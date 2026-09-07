@@ -156,7 +156,7 @@ td input,td select{padding:4px 7px;border:1px solid var(--bd);border-radius:4px;
     <input type="file" id="BKF" accept=".json" style="display:none" onchange="doImport(event)">
     <button class="btn bgy sm" onclick="exportAllXL()">📊 Export All</button>
     <button class="btn bg sm" onclick="backupNow()">💾 Backup</button>
-    <button class="btn bgy sm" onclick="window.open('help-meenakshi.html','_blank')">❓ Help Guide</button>
+    <button class="btn bgy sm" onclick="openHelpGuide()">❓ Help Guide</button>
     <button class="btn bgy sm" onclick="openChangePwd()">🔑 Password</button>
     <button class="btn br sm" onclick="doLogout()">🔒 Logout</button>
   </div>
@@ -1350,6 +1350,12 @@ async function handleEmailResetLandingIfAny(){
   setTimeout(()=>{document.getElementById('MO-EMTOK').classList.remove('hi');},500);
 }
 function doLogout(){sessionStorage.removeItem('MSN_USER');window.location.href='index.html';}
+// Routes each staff bot's own guide by username — falls back to the India
+// guide for anyone else (owner/admin accounts reviewing either bot).
+function openHelpGuide(){
+  const file=CU.username==='meenakshi'?'help-meenakshi.html':'help-shalini.html';
+  window.open(file,'_blank');
+}
 
 // ═══════════════════════════════════════════════
 // ROLE ACCESS

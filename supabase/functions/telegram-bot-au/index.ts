@@ -566,14 +566,15 @@ Deno.serve(async (req: Request) => {
   const { data: allowed } = await supabase
     .from("telegram_allowed_users_au").select("*").eq("chat_id", String(chatId)).eq("active", true).maybeSingle();
   if (!allowed) {
-    // Self-service allowlist: the first 2 distinct chats to message this bot
+    // Self-service allowlist: the first 4 distinct chats to message this bot
     // get auto-approved, no admin step needed — every sale they make is
     // already mirrored to MeenshaMonitor regardless (see notifyMonitor
     // below), so there's a visible backup trail even without manual vetting.
-    // Past 2 active users, new chats still need admin approval as before.
+    // Raised from 2 to 4 to cover the wider staff rollout. Past 4 active
+    // users, new chats still need admin approval as before.
     const { count } = await supabase
       .from("telegram_allowed_users_au").select("chat_id", { count: "exact", head: true }).eq("active", true);
-    if ((count ?? 0) < 2) {
+    if ((count ?? 0) < 4) {
       const from = update.message?.from ?? update.callback_query?.from;
       const label = [from?.first_name, from?.last_name].filter(Boolean).join(" ") || from?.username || `Chat ${chatId}`;
       await supabase.from("telegram_allowed_users_au").insert({ chat_id: String(chatId), label, active: true });
