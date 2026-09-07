@@ -12,7 +12,7 @@ body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:#2d2d2d;font-s
 /* LOGIN */
 .login-ov{position:fixed;inset:0;background:var(--dark);z-index:9999;display:flex;align-items:center;justify-content:center;}
 .login-box{background:#fff;border-radius:14px;padding:36px;width:340px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.4);}
-.login-logo{font-family:Georgia,serif;font-size:26px;color:var(--gdk);margin-bottom:4px;}
+.login-logo-gif{width:96px;height:96px;object-fit:contain;margin-bottom:6px;}
 .login-sub{font-size:11px;color:var(--gy);letter-spacing:.15em;text-transform:uppercase;margin-bottom:28px;}
 .login-box input{width:100%;padding:11px 14px;border:1px solid var(--bd);border-radius:8px;font-size:14px;margin-bottom:12px;outline:none;font-family:inherit;}
 .login-box input:focus{border-color:var(--gold);}
@@ -135,7 +135,7 @@ td input,td select{padding:4px 7px;border:1px solid var(--bd);border-radius:4px;
 <!-- LOGIN -->
 <div class="login-ov" id="LOV">
   <div class="login-box">
-    <div class="login-logo">मीनशा · Meensha</div>
+    <img src="meensha_rotating_logo.gif" alt="Meensha" class="login-logo-gif">
     <div class="login-sub">Karigar Portal</div>
     <input type="text" id="LU" placeholder="Username" onkeydown="if(event.key==='Enter')doLogin()">
     <input type="password" id="LP" placeholder="Password" onkeydown="if(event.key==='Enter')doLogin()">
