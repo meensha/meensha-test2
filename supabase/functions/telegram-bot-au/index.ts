@@ -30,6 +30,24 @@ function fmtAud(n: number) {
   return `A$${(n ?? 0).toFixed(2)}`;
 }
 
+function cartTotal(cart: any[]): number {
+  return (cart ?? []).reduce((sum: number, item: any) => sum + item.sku.sale_price_aud * item.qty, 0);
+}
+
+// Mirrors the storefront's couponDiscountBase (index.html) — a category
+// filter matches against item names, whole-cart discount otherwise.
+function couponDiscountBase(cart: any[], categoryFilter: string | null): number {
+  const matching = categoryFilter
+    ? (cart ?? []).filter((item: any) => (item.sku.name ?? "").toLowerCase().includes(categoryFilter.toLowerCase()))
+    : (cart ?? []);
+  return matching.reduce((sum: number, item: any) => sum + item.sku.sale_price_aud * item.qty, 0);
+}
+
+function effectiveTotal(data: any): number {
+  const sub = cartTotal(data.cart ?? []);
+  return Math.max(0, sub - (data.coupon_discount || 0));
+}
+
 async function tgSend(chatId: number | string, text: string, keyboard?: any) {
   await fetch(`${TG_API}/sendMessage`, {
     method: "POST",
@@ -78,8 +96,134 @@ async function showTopMenu(chatId: number) {
       [{ text: "🛍️ Kiosk mode (sale)", callback_data: "kiosk:start" }],
       [{ text: "📦 Stock intake (draft)", callback_data: "intake:start" }],
       [{ text: "📊 Reports", callback_data: "reports:start" }],
+      [{ text: "🎟️ Vouchers", callback_data: "vouchers:menu" }],
     ],
   });
+}
+
+async function showVouchersMenu(chatId: number) {
+  await tgSend(chatId, "Vouchers:", {
+    inline_keyboard: [
+      [{ text: "🎟️ Create voucher", callback_data: "vouchers:create" }],
+      [{ text: "📋 Create event form", callback_data: "vouchers:eventform" }],
+      [{ text: "◀ Back to menu", callback_data: "vouchers:back" }],
+    ],
+  });
+}
+
+const STOREFRONT_URL = "https://meensha.in";
+
+function daysFromNow(n: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+// ── Vouchers ─────────────────────────────────────────────────────────────────
+// Same admin_create_coupon / admin_create_voucher_event RPCs admin.html and
+// the India bot use — region is always "australia" here. See
+// setup/add_voucher_events.sql for the event-form schema.
+
+async function handleVoucherType(supabase: any, chatId: number, data: any, callbackData: string) {
+  const vType = callbackData.split(":")[2];
+  await saveSession(supabase, chatId, "voucher_value", { ...data, v_type: vType });
+  await tgSend(chatId, vType === "percent" ? "Discount %? (e.g. 10)" : "Discount amount in A$? (e.g. 20)");
+}
+
+async function handleVoucherText(supabase: any, chatId: number, state: string, data: any, text: string) {
+  const t = text.trim();
+  if (state === "voucher_code") {
+    if (!t) { await tgSend(chatId, "Code can't be empty — type a voucher code:"); return; }
+    await saveSession(supabase, chatId, "voucher_pick_type", { ...data, v_code: t.toUpperCase() });
+    await tgSend(chatId, "Discount type?", { inline_keyboard: [
+      [{ text: "% Percent off", callback_data: "voucher:type:percent" }],
+      [{ text: "A$ Flat amount off", callback_data: "voucher:type:flat" }],
+    ] });
+    return;
+  }
+  if (state === "voucher_value") {
+    const val = parseFloat(t);
+    if (!val || val <= 0 || (data.v_type === "percent" && val > 100)) { await tgSend(chatId, "Enter a valid discount value:"); return; }
+    await saveSession(supabase, chatId, "voucher_name", { ...data, v_value: val });
+    await tgSend(chatId, "For one specific customer? Type their name, or 'skip' for a public code anyone can use.");
+    return;
+  }
+  if (state === "voucher_name") {
+    if (t.toLowerCase() === "skip") {
+      await saveSession(supabase, chatId, "voucher_days", { ...data, v_name: null, v_wa: null });
+      await tgSend(chatId, "Valid for how many days? (leave blank for 7)");
+      return;
+    }
+    await saveSession(supabase, chatId, "voucher_wa", { ...data, v_name: t });
+    await tgSend(chatId, "Their WhatsApp number?");
+    return;
+  }
+  if (state === "voucher_wa") {
+    await saveSession(supabase, chatId, "voucher_days", { ...data, v_wa: t });
+    await tgSend(chatId, "Valid for how many days? (leave blank for 7)");
+    return;
+  }
+  if (state === "voucher_days") {
+    const days = t ? parseInt(t, 10) || 7 : 7;
+    const { data: coupon, error } = await supabase.rpc("admin_create_coupon", {
+      p_code: data.v_code, p_customer_name: data.v_name, p_customer_wa: data.v_wa,
+      p_discount_type: data.v_type, p_discount_value: data.v_value, p_region: "australia",
+      p_valid_from: daysFromNow(0), p_valid_until: daysFromNow(days),
+    });
+    if (error || !coupon) {
+      await tgSend(chatId, `Couldn't create the voucher — code "${data.v_code}" may already exist.`);
+    } else {
+      const discTxt = data.v_type === "percent" ? `${data.v_value}% off` : `${fmtAud(data.v_value)} off`;
+      const who = data.v_name ? `locked to ${data.v_name}` : "public — anyone can use it";
+      await tgSend(chatId, `🎟️ Voucher created: ${data.v_code}\n${discTxt}, ${who}, valid ${days} day(s).`);
+    }
+    await showVouchersMenu(chatId);
+    await saveSession(supabase, chatId, "idle", {});
+    return;
+  }
+}
+
+async function handleEventformType(supabase: any, chatId: number, data: any, callbackData: string) {
+  const efType = callbackData.split(":")[2];
+  await saveSession(supabase, chatId, "eventform_value", { ...data, ef_type: efType });
+  await tgSend(chatId, efType === "percent" ? "Discount %? (e.g. 10)" : "Discount amount in A$? (e.g. 20)");
+}
+
+async function handleEventformText(supabase: any, chatId: number, state: string, data: any, text: string) {
+  const t = text.trim();
+  if (state === "eventform_title") {
+    if (!t) { await tgSend(chatId, "Title can't be empty — type the event title:"); return; }
+    await saveSession(supabase, chatId, "eventform_pick_type", { ...data, ef_title: t });
+    await tgSend(chatId, "Discount type?", { inline_keyboard: [
+      [{ text: "% Percent off", callback_data: "eventform:type:percent" }],
+      [{ text: "A$ Flat amount off", callback_data: "eventform:type:flat" }],
+    ] });
+    return;
+  }
+  if (state === "eventform_value") {
+    const val = parseFloat(t);
+    if (!val || val <= 0 || (data.ef_type === "percent" && val > 100)) { await tgSend(chatId, "Enter a valid discount value:"); return; }
+    await saveSession(supabase, chatId, "eventform_days", { ...data, ef_value: val });
+    await tgSend(chatId, "Voucher valid for how many days after each visitor registers? (leave blank for 7)");
+    return;
+  }
+  if (state === "eventform_days") {
+    const days = t ? parseInt(t, 10) || 7 : 7;
+    const { data: ev, error } = await supabase.rpc("admin_create_voucher_event", {
+      p_title: data.ef_title, p_region: "australia", p_discount_type: data.ef_type,
+      p_discount_value: data.ef_value, p_valid_days: days, p_created_by: `telegram_au:${chatId}`,
+    });
+    if (error || !ev?.id) {
+      await tgSend(chatId, "Couldn't create the event form — try again.");
+    } else {
+      const link = `${STOREFRONT_URL}/register.html?event=${ev.id}`;
+      const discTxt = data.ef_type === "percent" ? `${data.ef_value}% off` : `${fmtAud(data.ef_value)} off`;
+      await tgSend(chatId, `📋 [${data.ef_title}](${link})\n\nShare this link — each visitor who fills in their name + WhatsApp gets their own unique voucher (${discTxt}, valid ${days} day(s)).\n\n${link}`);
+    }
+    await showVouchersMenu(chatId);
+    await saveSession(supabase, chatId, "idle", {});
+    return;
+  }
 }
 
 // ── Kiosk mode ──────────────────────────────────────────────────────────────
@@ -178,12 +322,9 @@ async function kioskFinalize(supabase: any, chatId: number, data: any) {
   }
 
   // sub/discount are NOT real columns on `sales` (verified against the live
-  // schema) — only total/paid/balance exist. Any discount from a coupon is
-  // already baked into how `total` should be computed once coupon entry is
-  // wired in (see the coupon-code-entry gap noted in the bot's design doc);
-  // for now there is no discount source, so total = sub.
-  const sub = cart.reduce((sum: number, item: any) => sum + item.sku.sale_price_aud * item.qty, 0);
-  const total = sub;
+  // schema) — only total/paid/balance exist, so a coupon discount is baked
+  // straight into `total` before it's written.
+  const total = effectiveTotal(data);
 
   const { data: invRow } = await supabase.from("settings").select("value").eq("key", "inv_counter").single();
   const invNum = (parseInt(invRow?.value ?? "1000", 10) || 1000) + 1;
@@ -260,6 +401,8 @@ async function reportStock(supabase: any, chatId: number) {
 
 async function handleTextInput(supabase: any, chatId: number, state: string, data: any, text: string) {
   if (!text) return;
+  if (state.startsWith("voucher_")) return handleVoucherText(supabase, chatId, state, data, text);
+  if (state.startsWith("eventform_")) return handleEventformText(supabase, chatId, state, data, text);
   switch (state) {
     case "kiosk_search":
       await kioskSearch(supabase, chatId, text);
@@ -269,9 +412,38 @@ async function handleTextInput(supabase: any, chatId: number, state: string, dat
       await tgSend(chatId, "Customer WhatsApp number?");
       break;
     case "kiosk_customer_wa":
-      await saveSession(supabase, chatId, "kiosk_amount", { ...data, customer_wa: text });
-      await tgSend(chatId, "Amount received? (leave blank for full amount)");
+      await saveSession(supabase, chatId, "kiosk_coupon_code", { ...data, customer_wa: text });
+      await tgSend(chatId, "Coupon code? Type a code, or 'skip' if none.");
       break;
+    case "kiosk_coupon_code": {
+      const code = text.trim();
+      if (code.toLowerCase() === "skip") {
+        await saveSession(supabase, chatId, "kiosk_amount", data);
+        await tgSend(chatId, `Amount received? (leave blank for full amount — total is ${fmtAud(effectiveTotal(data))})`);
+        break;
+      }
+      const { data: res } = await supabase.rpc("validate_coupon", {
+        p_code: code.toUpperCase(),
+        p_wa: data.customer_wa,
+        p_region: "australia",
+      });
+      if (!res?.valid) {
+        await tgSend(chatId, `${res?.message || "Invalid coupon"} — type another code, or 'skip'.`);
+        break;
+      }
+      const base = couponDiscountBase(data.cart ?? [], res.category_filter || null);
+      if (res.category_filter && base === 0) {
+        await tgSend(chatId, `${res.code} requires a matching item (${res.category_filter}) in the cart — type another code, or 'skip'.`);
+        break;
+      }
+      const discount = res.discount_type === "percent"
+        ? base * (parseFloat(res.discount_value) / 100)
+        : parseFloat(res.discount_value);
+      const newData = { ...data, coupon_code: res.code, coupon_discount: Math.min(discount, base) };
+      await saveSession(supabase, chatId, "kiosk_amount", newData);
+      await tgSend(chatId, `✅ ${res.code} applied — new total ${fmtAud(effectiveTotal(newData))}\n\nAmount received? (leave blank for full amount)`);
+      break;
+    }
     case "kiosk_amount": {
       const amt = text.trim() ? parseFloat(text) : undefined;
       await saveSession(supabase, chatId, "kiosk_payment_mode", { ...data, amount_paid: amt });
@@ -453,8 +625,7 @@ Deno.serve(async (req: Request) => {
   } else if (callbackData?.startsWith("kiosk:mode:")) {
     const mode = callbackData.split(":")[2];
     await saveSession(supabase, chatId, "kiosk_confirm", { ...data, payment_mode: mode });
-    const cart = data.cart ?? [];
-    const total = cart.reduce((s: number, i: any) => s + i.sku.sale_price_aud * i.qty, 0);
+    const total = effectiveTotal(data);
     await tgSend(chatId, `Confirm sale: ${fmtAud(data.amount_paid ?? total)} via ${mode}?`, {
       inline_keyboard: [[{ text: "✅ Confirm", callback_data: "kiosk:confirm" }, { text: "❌ Cancel", callback_data: "kiosk:cancel" }]],
     });
@@ -478,6 +649,21 @@ Deno.serve(async (req: Request) => {
     await reportToday(supabase, chatId);
   } else if (callbackData === "reports:stock") {
     await reportStock(supabase, chatId);
+  } else if (callbackData === "vouchers:menu") {
+    await showVouchersMenu(chatId);
+  } else if (callbackData === "vouchers:back") {
+    await showTopMenu(chatId);
+    await saveSession(supabase, chatId, "idle", {});
+  } else if (callbackData === "vouchers:create") {
+    await saveSession(supabase, chatId, "voucher_code", {});
+    await tgSend(chatId, "Voucher code? (e.g. SYDNEY10)");
+  } else if (callbackData === "vouchers:eventform") {
+    await saveSession(supabase, chatId, "eventform_title", {});
+    await tgSend(chatId, "Event title? (e.g. Sydney Pop-Up)");
+  } else if (callbackData?.startsWith("voucher:type:")) {
+    await handleVoucherType(supabase, chatId, data, callbackData);
+  } else if (callbackData?.startsWith("eventform:type:")) {
+    await handleEventformType(supabase, chatId, data, callbackData);
   } else if (callbackData?.startsWith("req:")) {
     const actorFrom = update.callback_query?.from;
     const actor = [actorFrom?.first_name, actorFrom?.last_name].filter(Boolean).join(" ") || actorFrom?.username || `Chat ${chatId}`;

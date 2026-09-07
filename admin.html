@@ -771,6 +771,7 @@ td input,td select{padding:4px 7px;border:1px solid var(--bd);border-radius:4px;
     </div>
     <div style="font-size:10px;color:var(--gy);margin-bottom:8px;" id="CP-FLATNOTE"></div>
     <button class="btn bg" onclick="createCoupon()">➕ Create Coupon</button>
+    <button class="btn bgy" style="margin-left:6px;" onclick="createEventForm()" title="Generate a shareable registration link — each visitor who fills in their name+WhatsApp gets their own unique voucher">🎉 Create Event Form</button>
   </div>
   <div class="card">
     <div class="ct">📋 Coupon Register</div>
@@ -1627,6 +1628,31 @@ async function createCoupon(){
   toast('✅ Coupon created','#27ae60');
   document.getElementById('CP-CODE').value='';document.getElementById('CP-NM').value='';document.getElementById('CP-WA').value='';document.getElementById('CP-VAL').value='';document.getElementById('CP-CATFILTER').value='';document.getElementById('CP-FROM').value='';document.getElementById('CP-UNTIL').value='';
   renderCoupons();
+}
+// Creates a voucher_events row (setup/add_voucher_events.sql) and gives back
+// a shareable register.html?event=<id> link — each visitor who fills in
+// their name+WhatsApp there gets their own unique one-time voucher.
+async function createEventForm(){
+  const title=prompt('Event title? (e.g. AFWWA Exhibition)');
+  if(!title||!title.trim())return;
+  const region=prompt('Region — type "india", "australia", or "all":','india');
+  if(!region||!['india','australia','all'].includes(region.trim().toLowerCase())){toast('Region must be india, australia, or all','var(--red)');return;}
+  const type=prompt('Discount type — type "percent" or "flat":','percent');
+  if(!type||!['percent','flat'].includes(type.trim().toLowerCase())){toast('Type must be percent or flat','var(--red)');return;}
+  const val=parseFloat(prompt('Discount value? (e.g. 10 for 10%, or 200 for a flat amount)'));
+  if(!val||val<=0){toast('Enter a valid discount value','var(--red)');return;}
+  const daysStr=prompt('Voucher valid for how many days after each visitor registers?','7');
+  const days=parseInt(daysStr,10)||7;
+  try{
+    const rr=await fetch(`${SB}/rest/v1/rpc/admin_create_voucher_event`,{method:'POST',headers:HDR(),body:JSON.stringify({p_title:title.trim(),p_region:region.trim().toLowerCase(),p_discount_type:type.trim().toLowerCase(),p_discount_value:val,p_valid_days:days,p_created_by:CU.username||'admin'})});
+    const ev=await rr.json();
+    if(!rr.ok||!ev?.id)throw new Error('Could not create event');
+    const link=`https://meensha.in/register.html?event=${ev.id}`;
+    navigator.clipboard.writeText(link).then(
+      ()=>toast('✅ Link copied: '+link,'#27ae60'),
+      ()=>toast('Link: '+link,'#27ae60')
+    );
+  }catch(e){toast('Error: '+e.message,'var(--red)');}
 }
 async function renderCoupons(){
   const body=document.getElementById('CP-BODY');if(!body)return;

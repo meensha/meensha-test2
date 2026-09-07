@@ -104,6 +104,30 @@
 const _SB = 'https://eglanmhhcccsuhbxywua.supabase.co';
 const _SK = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVnbGFubWhoY2Njc3VoYnh5d3VhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ4Nzc2MDQsImV4cCI6MjA5MDQ1MzYwNH0.0qjzkMVVajqMkx7SM-hhd6J62zVVFduVDbdr6juiNgo';
 
+// ?event=<id> switches this page from the generic stall-registration form
+// (fixed 5% code) to an event-scoped one — a specific event's own
+// discount/region, created via admin.html or either Telegram bot.
+const eventId = new URLSearchParams(location.search).get('event');
+let currentEvent = null;
+
+async function initEventMode() {
+  if (!eventId) return;
+  const res = await fetch(`${_SB}/rest/v1/rpc/get_voucher_event`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'apikey': _SK, 'Authorization': 'Bearer ' + _SK },
+    body: JSON.stringify({ p_event_id: eventId })
+  });
+  const ev = await res.json().catch(() => null);
+  if (!ev || ev.active === false) {
+    document.getElementById('form-view').innerHTML = '<h1>मीनशा · Meensha</h1><div class="sub">This event link is no longer active.</div>';
+    return;
+  }
+  currentEvent = ev;
+  const discTxt = ev.discount_type === 'percent' ? ev.discount_value + '% off' : (ev.region === 'australia' ? 'A$' : '₹') + ev.discount_value + ' off';
+  document.querySelector('.sub').textContent = `${ev.title} — register now and get ${discTxt}`;
+}
+initEventMode();
+
 async function submitRegistration() {
   const name = document.getElementById('reg-name').value.trim();
   const wa = document.getElementById('reg-wa').value.trim();
@@ -121,10 +145,12 @@ async function submitRegistration() {
   btn.textContent = 'Registering...';
 
   try {
-    const res = await fetch(`${_SB}/rest/v1/rpc/register_visitor`, {
+    const rpc = eventId ? 'register_event_visitor' : 'register_visitor';
+    const body = eventId ? { p_event_id: eventId, p_name: name, p_wa: wa } : { p_name: name, p_wa: wa };
+    const res = await fetch(`${_SB}/rest/v1/rpc/${rpc}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'apikey': _SK, 'Authorization': 'Bearer ' + _SK },
-      body: JSON.stringify({ p_name: name, p_wa: wa })
+      body: JSON.stringify(body)
     });
     const data = await res.json();
 
@@ -139,7 +165,8 @@ async function submitRegistration() {
     document.getElementById('form-view').style.display = 'none';
     document.getElementById('result-view').style.display = 'block';
     document.getElementById('result-heading').textContent = data.already_registered ? 'Welcome back!' : "You're registered!";
-    document.getElementById('result-discount').textContent = data.discount_value + '% off your order';
+    const sym = currentEvent && currentEvent.region === 'australia' ? 'A$' : '₹';
+    document.getElementById('result-discount').textContent = data.discount_type === 'flat' ? sym + data.discount_value + ' off your order' : data.discount_value + '% off your order';
     document.getElementById('result-code').textContent = data.code;
     document.getElementById('result-expiry').textContent = 'Valid until ' + new Date(data.valid_until).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
   } catch (e) {

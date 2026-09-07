@@ -106,6 +106,10 @@ Deno.serve(async (req: Request) => {
     await handleMaintenance(supabase, chatId, callbackData, data);
   } else if (callbackData?.startsWith("iglink:")) {
     await handleIglink(supabase, chatId, data, callbackData);
+  } else if (callbackData?.startsWith("voucher:type:")) {
+    await handleVoucherType(supabase, chatId, data, callbackData);
+  } else if (callbackData?.startsWith("eventform:type:")) {
+    await handleEventformType(supabase, chatId, data, callbackData);
   } else if (callbackData?.startsWith("req:")) {
     const actorFrom = update.callback_query?.from;
     const actor = [actorFrom?.first_name, actorFrom?.last_name].filter(Boolean).join(" ") || actorFrom?.username || `Chat ${chatId}`;
@@ -122,6 +126,10 @@ Deno.serve(async (req: Request) => {
     await handleMaintenanceText(supabase, chatId, text);
   } else if (text && state === "iglink_caption_text") {
     await handleIglinkCaptionText(supabase, chatId, data, text);
+  } else if (text && state.startsWith("voucher_")) {
+    await handleVoucherText(supabase, chatId, state, data, text);
+  } else if (text && state.startsWith("eventform_")) {
+    await handleEventformText(supabase, chatId, state, data, text);
   } else if (text) {
     await handleTextInput(supabase, chatId, state, data, text);
   }
@@ -200,6 +208,8 @@ async function showMaintenanceMenu(chatId: number) {
       [{ text: "📸 Event photo submissions", callback_data: "evphoto:menu" }],
       [{ text: "📝 Add a note", callback_data: "maint:note" }],
       [{ text: "🔗 Insta link", callback_data: "maint:iglink" }],
+      [{ text: "🎟️ Create voucher", callback_data: "maint:voucher" }],
+      [{ text: "📋 Create event form", callback_data: "maint:eventform" }],
       [{ text: "◀ Back to menu", callback_data: "maint:back" }],
     ],
   });
@@ -223,6 +233,16 @@ async function handleMaintenance(supabase: SB, chatId: number, callbackData: str
   if (callbackData === "maint:iglink") {
     await showIglinkItemPicker(supabase, chatId, {});
     await saveSession(supabase, chatId, "iglink_pick_item", {});
+    return;
+  }
+  if (callbackData === "maint:voucher") {
+    await tgSend(chatId, "Voucher code? (e.g. DIWALI200)");
+    await saveSession(supabase, chatId, "voucher_code", {});
+    return;
+  }
+  if (callbackData === "maint:eventform") {
+    await tgSend(chatId, "Event title? (e.g. AFWWA Exhibition)");
+    await saveSession(supabase, chatId, "eventform_title", {});
     return;
   }
 }
@@ -369,6 +389,171 @@ async function handleIglink(supabase: SB, chatId: number, data: SessionData, cal
     }
     data.pendingSku = { id: sku.id, name: sku.name, price: sku.sale_price };
     await askIglinkCaption(supabase, chatId, data);
+    return;
+  }
+}
+
+// ═══════════════════════════════════════════════
+// MAINTENANCE → CREATE VOUCHER
+// ═══════════════════════════════════════════════
+// Direct equivalent of admin.html's Coupons tab "New Coupon" form, reusing
+// the same admin_create_coupon RPC — region is always "india" since this
+// is the India-side bot. Leave name/WA blank ("skip") for a public code
+// anyone can use; fill them in to lock the voucher to one customer.
+function daysFromNow(n: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+async function handleVoucherType(supabase: SB, chatId: number, data: SessionData, callbackData: string) {
+  data.v_type = callbackData.split(":")[2]; // "percent" | "flat"
+  await tgSend(chatId, data.v_type === "percent" ? "Discount %? (e.g. 10)" : "Discount amount in ₹? (e.g. 200)");
+  await saveSession(supabase, chatId, "voucher_value", data);
+}
+
+async function handleVoucherText(supabase: SB, chatId: number, state: string, data: SessionData, text: string) {
+  const t = text.trim();
+  if (state === "voucher_code") {
+    if (!t) {
+      await tgSend(chatId, "Code can't be empty — type a voucher code:");
+      return;
+    }
+    data.v_code = t.toUpperCase();
+    await tgSend(chatId, "Discount type?", {
+      inline_keyboard: [
+        [{ text: "% Percent off", callback_data: "voucher:type:percent" }],
+        [{ text: "₹ Flat amount off", callback_data: "voucher:type:flat" }],
+      ],
+    });
+    await saveSession(supabase, chatId, "voucher_pick_type", data);
+    return;
+  }
+  if (state === "voucher_value") {
+    const val = parseFloat(t);
+    if (!val || val <= 0 || (data.v_type === "percent" && val > 100)) {
+      await tgSend(chatId, "Enter a valid discount value:");
+      return;
+    }
+    data.v_value = val;
+    await tgSend(chatId, "For one specific customer? Type their name, or 'skip' for a public code anyone can use.");
+    await saveSession(supabase, chatId, "voucher_name", data);
+    return;
+  }
+  if (state === "voucher_name") {
+    if (t.toLowerCase() === "skip") {
+      data.v_name = null;
+      data.v_wa = null;
+      await tgSend(chatId, "Valid for how many days? (leave blank for 7)");
+      await saveSession(supabase, chatId, "voucher_days", data);
+      return;
+    }
+    data.v_name = t;
+    await tgSend(chatId, "Their WhatsApp number?");
+    await saveSession(supabase, chatId, "voucher_wa", data);
+    return;
+  }
+  if (state === "voucher_wa") {
+    data.v_wa = t;
+    await tgSend(chatId, "Valid for how many days? (leave blank for 7)");
+    await saveSession(supabase, chatId, "voucher_days", data);
+    return;
+  }
+  if (state === "voucher_days") {
+    const days = t ? parseInt(t, 10) || 7 : 7;
+    const { data: coupon, error } = await supabase.rpc("admin_create_coupon", {
+      p_code: data.v_code,
+      p_customer_name: data.v_name,
+      p_customer_wa: data.v_wa,
+      p_discount_type: data.v_type,
+      p_discount_value: data.v_value,
+      p_region: "india",
+      p_valid_from: daysFromNow(0),
+      p_valid_until: daysFromNow(days),
+    });
+    if (error || !coupon) {
+      await tgSend(chatId, `Couldn't create the voucher — code "${data.v_code}" may already exist.`);
+      await showMaintenanceMenu(chatId);
+      await saveSession(supabase, chatId, "idle", {});
+      return;
+    }
+    const discTxt = data.v_type === "percent" ? `${data.v_value}% off` : `₹${data.v_value} off`;
+    const who = data.v_name ? `locked to ${data.v_name}` : "public — anyone can use it";
+    await tgSend(chatId, `🎟️ Voucher created: ${data.v_code}\n${discTxt}, ${who}, valid ${days} day(s).`);
+    await showMaintenanceMenu(chatId);
+    await saveSession(supabase, chatId, "idle", {});
+    return;
+  }
+}
+
+// ═══════════════════════════════════════════════
+// MAINTENANCE → CREATE EVENT FORM
+// ═══════════════════════════════════════════════
+// Creates a voucher_events row and hands back a shareable registration
+// link (register.html?event=<id>) — anyone who fills in their name+WA on
+// that link gets their own unique one-time voucher with this event's
+// discount, region always "india" for this bot. See setup/add_voucher_events.sql.
+async function handleEventformType(supabase: SB, chatId: number, data: SessionData, callbackData: string) {
+  data.ef_type = callbackData.split(":")[2];
+  await tgSend(chatId, data.ef_type === "percent" ? "Discount %? (e.g. 10)" : "Discount amount in ₹? (e.g. 200)");
+  await saveSession(supabase, chatId, "eventform_value", data);
+}
+
+async function handleEventformText(supabase: SB, chatId: number, state: string, data: SessionData, text: string) {
+  const t = text.trim();
+  if (state === "eventform_title") {
+    if (!t) {
+      await tgSend(chatId, "Title can't be empty — type the event title:");
+      return;
+    }
+    data.ef_title = t;
+    await tgSend(chatId, "Discount type?", {
+      inline_keyboard: [
+        [{ text: "% Percent off", callback_data: "eventform:type:percent" }],
+        [{ text: "₹ Flat amount off", callback_data: "eventform:type:flat" }],
+      ],
+    });
+    await saveSession(supabase, chatId, "eventform_pick_type", data);
+    return;
+  }
+  if (state === "eventform_value") {
+    const val = parseFloat(t);
+    if (!val || val <= 0 || (data.ef_type === "percent" && val > 100)) {
+      await tgSend(chatId, "Enter a valid discount value:");
+      return;
+    }
+    data.ef_value = val;
+    await tgSend(chatId, "Voucher valid for how many days after each visitor registers? (leave blank for 7)");
+    await saveSession(supabase, chatId, "eventform_days", data);
+    return;
+  }
+  if (state === "eventform_days") {
+    const days = t ? parseInt(t, 10) || 7 : 7;
+    const { data: ev, error } = await supabase.rpc("admin_create_voucher_event", {
+      p_title: data.ef_title,
+      p_region: "india",
+      p_discount_type: data.ef_type,
+      p_discount_value: data.ef_value,
+      p_valid_days: days,
+      p_created_by: `telegram:${chatId}`,
+    });
+    if (error || !ev?.id) {
+      await tgSend(chatId, "Couldn't create the event form — try again.");
+      await showMaintenanceMenu(chatId);
+      await saveSession(supabase, chatId, "idle", {});
+      return;
+    }
+    const link = `${STOREFRONT_URL}/register.html?event=${ev.id}`;
+    await tgSend(
+      chatId,
+      `📋 <a href="${link}">${escapeHtml(data.ef_title)}</a>\n\n` +
+        `Share this link — each visitor who fills in their name + WhatsApp gets their own unique voucher ` +
+        `(${data.ef_type === "percent" ? data.ef_value + "% off" : "₹" + data.ef_value + " off"}, valid ${days} day(s)).\n\n${link}`,
+      undefined,
+      "HTML",
+    );
+    await showMaintenanceMenu(chatId);
+    await saveSession(supabase, chatId, "idle", {});
     return;
   }
 }
