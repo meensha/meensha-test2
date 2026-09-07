@@ -48,6 +48,14 @@ function effectiveTotal(data: any): number {
   return Math.max(0, sub - (data.coupon_discount || 0));
 }
 
+async function showKioskConfirm(supabase: any, chatId: number, data: any) {
+  await saveSession(supabase, chatId, "kiosk_confirm", data);
+  const total = effectiveTotal(data);
+  await tgSend(chatId, `Confirm sale: ${fmtAud(data.amount_paid ?? total)} via ${data.payment_mode}?`, {
+    inline_keyboard: [[{ text: "✅ Confirm", callback_data: "kiosk:confirm" }, { text: "❌ Cancel", callback_data: "kiosk:cancel" }]],
+  });
+}
+
 async function tgSend(chatId: number | string, text: string, keyboard?: any) {
   await fetch(`${TG_API}/sendMessage`, {
     method: "POST",
@@ -450,7 +458,14 @@ async function handleTextInput(supabase: any, chatId: number, state: string, dat
       await tgSend(chatId, "Payment mode?", { inline_keyboard: [[
         { text: "💵 Cash", callback_data: "kiosk:mode:Cash" },
         { text: "📱 Card", callback_data: "kiosk:mode:Card" },
+        { text: "🔁 Other", callback_data: "kiosk:mode:other" },
       ]] });
+      break;
+    }
+    case "kiosk_payment_mode_other": {
+      const mode = text.trim();
+      if (!mode) { await tgSend(chatId, "How was it paid? (e.g. Bank Transfer, PayID)"); break; }
+      await showKioskConfirm(supabase, chatId, { ...data, payment_mode: mode });
       break;
     }
     case "intake_search":
@@ -623,13 +638,12 @@ Deno.serve(async (req: Request) => {
     await tgSend(chatId, "Customer name?");
   } else if (callbackData === "kiosk:cancel") {
     await kioskCancelSale(supabase, chatId, data);
+  } else if (callbackData === "kiosk:mode:other") {
+    await saveSession(supabase, chatId, "kiosk_payment_mode_other", data);
+    await tgSend(chatId, "How was it paid? (e.g. Bank Transfer, PayID)");
   } else if (callbackData?.startsWith("kiosk:mode:")) {
     const mode = callbackData.split(":")[2];
-    await saveSession(supabase, chatId, "kiosk_confirm", { ...data, payment_mode: mode });
-    const total = effectiveTotal(data);
-    await tgSend(chatId, `Confirm sale: ${fmtAud(data.amount_paid ?? total)} via ${mode}?`, {
-      inline_keyboard: [[{ text: "✅ Confirm", callback_data: "kiosk:confirm" }, { text: "❌ Cancel", callback_data: "kiosk:cancel" }]],
-    });
+    await showKioskConfirm(supabase, chatId, { ...data, payment_mode: mode });
   } else if (callbackData === "kiosk:confirm") {
     await kioskFinalize(supabase, chatId, data);
   } else if (callbackData === "intake:start") {
