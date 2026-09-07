@@ -20,6 +20,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { askGemini } from "../_shared/askGemini.ts";
 import { LOOKUP_CATALOG_REGIONAL, runLookup } from "../_shared/knowledgeBase.ts";
 import { handleRequestAction } from "../_shared/requestActions.ts";
+import { logActivity } from "../_shared/activityLog.ts";
 
 const BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN_AU")!;
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
@@ -64,25 +65,6 @@ async function tgSend(chatId: number | string, text: string, keyboard?: any) {
   });
 }
 
-// Best-effort copy of a sale confirmation to MeenshaMonitor (@meenshabot) —
-// the cross-region visibility bot referenced in the header comment above.
-// Silently no-ops if the monitor chat hasn't been set up yet
-// (settings.telegram_monitor_chat_id empty) or TELEGRAM_MONITOR_BOT_TOKEN
-// isn't set — this must never block or fail a real sale.
-async function notifyMonitor(supabase: any, text: string) {
-  try {
-    const monitorToken = Deno.env.get("TELEGRAM_MONITOR_BOT_TOKEN");
-    if (!monitorToken) return;
-    const { data: row } = await supabase.from("settings").select("value").eq("key", "telegram_monitor_chat_id").single();
-    const chatId = row?.value;
-    if (!chatId) return;
-    await fetch(`https://api.telegram.org/bot${monitorToken}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text }),
-    });
-  } catch { /* monitor notification is best-effort, never breaks a sale */ }
-}
 
 async function tgSendPhoto(chatId: number | string, photoUrl: string, caption: string, keyboard?: any) {
   await fetch(`${TG_API}/sendPhoto`, {
@@ -184,6 +166,7 @@ async function handleVoucherText(supabase: any, chatId: number, state: string, d
       const discTxt = data.v_type === "percent" ? `${data.v_value}% off` : `${fmtAud(data.v_value)} off`;
       const who = data.v_name ? `locked to ${data.v_name}` : "public — anyone can use it";
       await tgSend(chatId, `🎟️ Voucher created: ${data.v_code}\n${discTxt}, ${who}, valid ${days} day(s).`);
+      await logActivity(supabase, "au", chatId, "voucher", data.v_code);
     }
     await showVouchersMenu(chatId);
     await saveSession(supabase, chatId, "idle", {});
@@ -227,6 +210,7 @@ async function handleEventformText(supabase: any, chatId: number, state: string,
       const link = `${STOREFRONT_URL}/register.html?event=${ev.id}`;
       const discTxt = data.ef_type === "percent" ? `${data.ef_value}% off` : `${fmtAud(data.ef_value)} off`;
       await tgSend(chatId, `📋 [${data.ef_title}](${link})\n\nShare this link — each visitor who fills in their name + WhatsApp gets their own unique voucher (${discTxt}, valid ${days} day(s)).\n\n${link}`);
+      await logActivity(supabase, "au", chatId, "event_form", data.ef_title);
     }
     await showVouchersMenu(chatId);
     await saveSession(supabase, chatId, "idle", {});
@@ -367,7 +351,7 @@ async function kioskFinalize(supabase: any, chatId: number, data: any) {
   await tgSend(chatId, `✅ Sale complete — ${sale.inv}\nTotal: ${fmtAud(total)}\n\n[Tap to send invoice to customer](https://wa.me/${waDigits}?text=${waMsg})\n\n🧾 View/print invoice yourself: ${invoiceUrl}`, {
     inline_keyboard: [[{ text: "🆕 Start new sale", callback_data: "kiosk:start" }]],
   });
-  await notifyMonitor(supabase, `🇦🇺 Sale ${sale.inv} — ${fmtAud(total)} (${data.payment_mode || "?"}), via AU Kiosk bot`);
+  await logActivity(supabase, "au", chatId, "sale", data.payment_mode, total);
 }
 
 // ── Stock Intake (draft-only) ───────────────────────────────────────────────
@@ -539,8 +523,7 @@ async function submitDraft(supabase: any, chatId: number, data: any) {
   await tgSend(chatId, `✅ Draft submitted for approval (${data.proposed_name ?? "matched item"}).\nAdmin will review on the web dashboard.`, {
     inline_keyboard: [[{ text: "🆕 Start new", callback_data: "intake:start" }]],
   });
-  // Best-effort notification to the admin bot's chat, via a shared settings key
-  // if configured — not required for the draft itself to succeed.
+  await logActivity(supabase, "au", chatId, "stock_intake", data.proposed_name ?? "matched item");
 }
 
 async function handlePhoto(supabase: any, chatId: number, state: string, data: any, photoSizes: any[]) {
@@ -583,10 +566,11 @@ Deno.serve(async (req: Request) => {
   if (!allowed) {
     // Self-service allowlist: the first 4 distinct chats to message this bot
     // get auto-approved, no admin step needed — every sale they make is
-    // already mirrored to MeenshaMonitor regardless (see notifyMonitor
-    // below), so there's a visible backup trail even without manual vetting.
-    // Raised from 2 to 4 to cover the wider staff rollout. Past 4 active
-    // users, new chats still need admin approval as before.
+    // already logged to bot_activity_log regardless (see logActivity calls
+    // below), rolled into a MeenshaMonitor session summary, so there's a
+    // visible backup trail even without manual vetting. Raised from 2 to 4
+    // to cover the wider staff rollout. Past 4 active users, new chats
+    // still need admin approval as before.
     const { count } = await supabase
       .from("telegram_allowed_users_au").select("chat_id", { count: "exact", head: true }).eq("active", true);
     if ((count ?? 0) < 4) {

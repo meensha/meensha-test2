@@ -11,6 +11,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { askGemini } from "../_shared/askGemini.ts";
 import { LOOKUP_CATALOG_REGIONAL, runLookup } from "../_shared/knowledgeBase.ts";
 import { handleRequestAction } from "../_shared/requestActions.ts";
+import { logActivity } from "../_shared/activityLog.ts";
 
 const BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN")!;
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
@@ -154,26 +155,6 @@ async function tgSend(chatId: number, text: string, replyMarkup?: unknown, parse
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text, reply_markup: replyMarkup, parse_mode: parseMode }),
   });
-}
-
-// Best-effort copy of a sale confirmation to MeenshaMonitor (@meenshabot),
-// a separate read-only bot for owner-side visibility. Silently no-ops if
-// the monitor chat hasn't been set up yet (settings.telegram_monitor_chat_id
-// empty) or TELEGRAM_MONITOR_BOT_TOKEN isn't set — this must never block or
-// fail a real sale.
-async function notifyMonitor(supabase: SB, text: string) {
-  try {
-    const monitorToken = Deno.env.get("TELEGRAM_MONITOR_BOT_TOKEN");
-    if (!monitorToken) return;
-    const { data: row } = await supabase.from("settings").select("value").eq("key", "telegram_monitor_chat_id").single();
-    const chatId = row?.value;
-    if (!chatId) return;
-    await fetch(`https://api.telegram.org/bot${monitorToken}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text }),
-    });
-  } catch { /* monitor notification is best-effort, never breaks a sale */ }
 }
 
 async function saveSession(supabase: SB, chatId: number, state: string, data: SessionData) {
@@ -352,6 +333,7 @@ async function handleIglinkCaptionText(supabase: SB, chatId: number, data: Sessi
     undefined,
     "HTML",
   );
+  await logActivity(supabase, "india", chatId, "insta_link", data.pendingSku.name);
   await showMaintenanceMenu(chatId);
   await saveSession(supabase, chatId, "idle", {});
 }
@@ -480,6 +462,7 @@ async function handleVoucherText(supabase: SB, chatId: number, state: string, da
     const discTxt = data.v_type === "percent" ? `${data.v_value}% off` : `₹${data.v_value} off`;
     const who = data.v_name ? `locked to ${data.v_name}` : "public — anyone can use it";
     await tgSend(chatId, `🎟️ Voucher created: ${data.v_code}\n${discTxt}, ${who}, valid ${days} day(s).`);
+    await logActivity(supabase, "india", chatId, "voucher", data.v_code);
     await showMaintenanceMenu(chatId);
     await saveSession(supabase, chatId, "idle", {});
     return;
@@ -552,6 +535,7 @@ async function handleEventformText(supabase: SB, chatId: number, state: string, 
       undefined,
       "HTML",
     );
+    await logActivity(supabase, "india", chatId, "event_form", data.ef_title);
     await showMaintenanceMenu(chatId);
     await saveSession(supabase, chatId, "idle", {});
     return;
@@ -836,6 +820,12 @@ async function handleKiosk(
     }
   }
 
+  if (state === "kiosk_payment_mode" && callbackData === "kiosk:pay:other") {
+    await tgSend(chatId, "How was it paid? (e.g. Bank Transfer, Cheque)", { inline_keyboard: [BACK_ROW, CANCEL_ROW] });
+    await saveSession(supabase, chatId, "kiosk_paymode_other_text", data);
+    return;
+  }
+
   if (state === "kiosk_payment_mode" && callbackData.startsWith("kiosk:pay:")) {
     const modeMap: Record<string, string> = { cash: "Cash", upi: "UPI Direct", razorpay: "Razorpay" };
     data.pay_mode = modeMap[callbackData.split(":")[2]];
@@ -845,16 +835,7 @@ async function handleKiosk(
       return;
     }
 
-    const total = orderTotal(data);
-    await tgSend(chatId, `Amount received — ₹${total}?`, {
-      inline_keyboard: [
-        [{ text: `✅ Yes, ₹${total} in full`, callback_data: "kiosk:amount:full" }],
-        BACK_ROW,
-        CANCEL_ROW,
-      ],
-    });
-    await tgSend(chatId, "Or reply with the actual amount if different.");
-    await saveSession(supabase, chatId, "kiosk_amount", data);
+    await askKioskAmount(supabase, chatId, data);
     return;
   }
 
@@ -1037,6 +1018,17 @@ async function handleTextInput(
     data.page = 0;
     await showIglinkItemPicker(supabase, chatId, data);
     await saveSession(supabase, chatId, "iglink_pick_item", data);
+    return;
+  }
+
+  if (state === "kiosk_paymode_other_text") {
+    const mode = text.trim();
+    if (!mode) {
+      await tgSend(chatId, "How was it paid? (e.g. Bank Transfer, Cheque)");
+      return;
+    }
+    data.pay_mode = mode;
+    await askKioskAmount(supabase, chatId, data);
     return;
   }
 
@@ -1229,12 +1221,26 @@ async function showOrderSummary(chatId: number, data: SessionData) {
   );
 }
 
+async function askKioskAmount(supabase: SB, chatId: number, data: SessionData) {
+  const total = orderTotal(data);
+  await tgSend(chatId, `Amount received — ₹${total}?`, {
+    inline_keyboard: [
+      [{ text: `✅ Yes, ₹${total} in full`, callback_data: "kiosk:amount:full" }],
+      BACK_ROW,
+      CANCEL_ROW,
+    ],
+  });
+  await tgSend(chatId, "Or reply with the actual amount if different.");
+  await saveSession(supabase, chatId, "kiosk_amount", data);
+}
+
 async function askPaymentMode(supabase: SB, chatId: number, data: SessionData) {
   await tgSend(chatId, "Payment mode?", {
     inline_keyboard: [
       [{ text: "💵 Cash", callback_data: "kiosk:pay:cash" }],
       [{ text: "📲 UPI Direct", callback_data: "kiosk:pay:upi" }],
       [{ text: "💳 Razorpay", callback_data: "kiosk:pay:razorpay" }],
+      [{ text: "🔁 Other", callback_data: "kiosk:pay:other" }],
       BACK_ROW,
       CANCEL_ROW,
     ],
@@ -1319,6 +1325,7 @@ async function sendRazorpayLink(supabase: SB, chatId: number, data: SessionData)
       (waLink ? `\n\nTap to send to customer: ${waLink}` : "") +
       `\n\nYou'll get a message here the moment it's paid.`,
   );
+  await logActivity(supabase, "india", chatId, "razorpay_link", undefined, total);
 
   data = { cart: [], page: 0 };
   await showItemPicker(supabase, chatId, data);
@@ -1395,7 +1402,7 @@ async function finalizeSale(supabase: SB, chatId: number, data: SessionData) {
       (waLink ? `\n\nTap to send invoice to customer: ${waLink}` : "") +
       `\n\n🧾 View/print invoice yourself: ${invoiceUrl}`,
   );
-  await notifyMonitor(supabase, `🇮🇳 Sale ${inv} — ₹${total} (${data.pay_mode || "?"}), via India Kiosk bot`);
+  await logActivity(supabase, "india", chatId, "sale", data.pay_mode, total);
 }
 
 // ═══════════════════════════════════════════════
@@ -1544,7 +1551,7 @@ async function handleInventory(
     }
     const vendorName = data.vendor_name;
     await tgSend(chatId, `✅ Submitted for approval (${items.length} items) — admin will review on the web dashboard before it's live.`);
-    await notifyMonitor(supabase, `🧾 Purchase submitted for approval — ${vendorName}, ${items.length} items, via India bot`);
+    await logActivity(supabase, "india", chatId, "stock_intake", `${vendorName}, ${items.length} items`);
     data = { items: [] };
     await tgSend(chatId, "Search vendor by name or WhatsApp number for the next purchase:", {
       inline_keyboard: [[{ text: "➕ New Vendor", callback_data: "inv:newvendor" }], INV_EXIT_ROW],
