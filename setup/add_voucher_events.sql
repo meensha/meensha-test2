@@ -59,7 +59,7 @@ BEGIN
     AND right(regexp_replace(customer_wa, '[^0-9]', '', 'g'), 10) = right(wa_digits, 10)
   LIMIT 1;
 
-  IF existing IS NOT NULL THEN
+  IF FOUND THEN
     RETURN jsonb_build_object(
       'code', existing.code, 'discount_type', existing.discount_type,
       'discount_value', existing.discount_value, 'valid_until', existing.valid_until,
