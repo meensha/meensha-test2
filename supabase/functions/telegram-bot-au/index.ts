@@ -332,6 +332,7 @@ async function kioskFinalize(supabase: any, chatId: number, data: any) {
     items, total, paid: data.amount_paid ?? total,
     balance: total - (data.amount_paid ?? total),
     pay_mode: data.payment_mode, delivery_mode: "offline", shipping_status: "na",
+    taxes: [], // kiosk/storefront sales are never taxed — only admin.html's manual entry has a tax toggle
     created_by: "telegram_bot_au", source: "telegram_au",
   }).select().single();
 
@@ -341,12 +342,25 @@ async function kioskFinalize(supabase: any, chatId: number, data: any) {
 
   if (data.coupon_code) await supabase.rpc("consume_coupon", { p_code: data.coupon_code, p_wa: data.customer_wa });
 
+  // Best-effort PDF generation — awaited so the WhatsApp draft below can
+  // include the link, but never lets a PDF failure block the sale itself.
+  let pdfUrl: string | null = null;
+  try {
+    const pdfRes = await fetch(`${SB_URL}/functions/v1/generate-invoice-pdf`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${SB_SERVICE_KEY}` },
+      body: JSON.stringify({ sale_id: sale.id }),
+    });
+    const pdfJson = await pdfRes.json();
+    if (pdfJson?.ok) pdfUrl = pdfJson.url ?? null;
+  } catch { /* best-effort, never blocks the sale */ }
+
   const waDigits = (data.customer_wa ?? "").replace(/\D/g, "");
   // Links to the real branded invoice (invoice.html, public/unauthenticated
   // — not admin.html, which requires staff login) instead of re-typing the
   // order as plain WhatsApp text.
   const invoiceUrl = `https://meensha.in/invoice.html?invoice=${encodeURIComponent(sale.inv)}&wa=${waDigits}`;
-  const waMsg = encodeURIComponent(`Hi ${data.customer_name}! Thank you for your Meensha order. Your invoice (${sale.inv}) is here: ${invoiceUrl}`);
+  const waMsg = encodeURIComponent(`Hi ${data.customer_name}! Thank you for your Meensha order. Your invoice (${sale.inv}) is here: ${invoiceUrl}` + (pdfUrl ? `\n\nPDF: ${pdfUrl}` : ""));
   await saveSession(supabase, chatId, "idle", {});
   await tgSend(chatId, `✅ Sale complete — ${sale.inv}\nTotal: ${fmtAud(total)}\n\n[Tap to send invoice to customer](https://wa.me/${waDigits}?text=${waMsg})\n\n🧾 View/print invoice yourself: ${invoiceUrl}`, {
     inline_keyboard: [[{ text: "🆕 Start new sale", callback_data: "kiosk:start" }]],

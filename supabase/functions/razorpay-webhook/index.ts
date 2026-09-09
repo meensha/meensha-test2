@@ -90,6 +90,7 @@ Deno.serve(async (req: Request) => {
       notes: "Online order via storefront cart",
       delivery_mode: "offline",
       shipping_status: "na",
+      taxes: [], // kiosk/storefront sales are never taxed — only admin.html's manual entry has a tax toggle
       created_by: "storefront",
       source: "storefront",
     })
@@ -110,6 +111,22 @@ Deno.serve(async (req: Request) => {
       p_code: order.coupon.code,
       p_wa: order.coupon.wa,
     });
+  }
+
+  // Best-effort invoice PDF generation — never blocks the webhook's own
+  // response to Razorpay, and Razorpay itself never sees this sale's
+  // invoice link (there's no WhatsApp draft built here, unlike the bots).
+  if (!saleErr && saleRows) {
+    try {
+      await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/generate-invoice-pdf`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+        },
+        body: JSON.stringify({ sale_id: saleRows.id }),
+      });
+    } catch { /* best-effort, never blocks the webhook response */ }
   }
 
   // Kiosk-initiated Razorpay sales don't finalize in the bot itself — the

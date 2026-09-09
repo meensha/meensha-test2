@@ -1364,6 +1364,7 @@ async function finalizeSale(supabase: SB, chatId: number, data: SessionData) {
       pay_mode: data.pay_mode,
       delivery_mode: "offline",
       shipping_status: "na",
+      taxes: [], // kiosk/storefront sales are never taxed — only admin.html's manual entry has a tax toggle
       created_by: "telegram_bot",
       source: "telegram",
     })
@@ -1383,6 +1384,25 @@ async function finalizeSale(supabase: SB, chatId: number, data: SessionData) {
     });
   }
 
+  // Fire off PDF generation now — awaited so the WhatsApp draft below can
+  // include the link, but any failure is swallowed: a missing PDF link must
+  // never block the sale confirmation itself.
+  let pdfUrl: string | null = null;
+  if (saleRow) {
+    try {
+      const pdfRes = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/generate-invoice-pdf`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+        },
+        body: JSON.stringify({ sale_id: saleRow.id }),
+      });
+      const pdfJson = await pdfRes.json();
+      if (pdfJson?.ok) pdfUrl = pdfJson.url ?? null;
+    } catch { /* best-effort, never blocks the sale */ }
+  }
+
   const lines = formatCartLines(data);
   const waDigits = String(data.customer_wa ?? "").replace(/\D/g, "");
   // The customer-facing message links to the real branded invoice
@@ -1392,7 +1412,8 @@ async function finalizeSale(supabase: SB, chatId: number, data: SessionData) {
   // number and the matching WhatsApp number to actually show anything.
   const invoiceUrl = `https://meensha.in/invoice.html?invoice=${encodeURIComponent(inv)}&wa=${waDigits}`;
   const waMsg = encodeURIComponent(
-    `Hi ${data.customer_name}! Thank you for your Meensha order. Your invoice (${inv}) is here: ${invoiceUrl}`,
+    `Hi ${data.customer_name}! Thank you for your Meensha order. Your invoice (${inv}) is here: ${invoiceUrl}` +
+      (pdfUrl ? `\n\nPDF: ${pdfUrl}` : ""),
   );
   const waLink = waDigits ? `https://wa.me/${waDigits}?text=${waMsg}` : null;
 
@@ -2350,15 +2371,34 @@ async function showSaleSummary(supabase: SB, chatId: number, saleId: string) {
 }
 
 async function sendHistoryInvoiceLink(supabase: SB, chatId: number, saleId: string) {
-  const { data: s } = await supabase.from("sales").select("inv, customer, total, paid").eq("id", saleId).single();
+  const { data: s } = await supabase.from("sales").select("inv, customer, total, paid, invoice_pdf_path").eq("id", saleId).single();
   if (!s) {
     await tgSend(chatId, "That sale couldn't be found.");
     return;
   }
+  // Calls generate-invoice-pdf unconditionally rather than only re-signing
+  // when invoice_pdf_path is already set — that function is idempotent
+  // (renders on first request, just re-signs on later ones), so this is
+  // what makes PDFs reachable for sales made before this feature shipped,
+  // not just ones finalized after it.
+  let pdfUrl: string | null = null;
+  try {
+    const pdfRes = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/generate-invoice-pdf`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+      },
+      body: JSON.stringify({ sale_id: saleId }),
+    });
+    const pdfJson = await pdfRes.json();
+    if (pdfJson?.ok) pdfUrl = pdfJson.url ?? null;
+  } catch { /* best-effort, never blocks the history lookup */ }
   const waDigits = String(s.customer?.wa ?? "").replace(/\D/g, "");
   const invoiceUrl = `https://meensha.in/invoice.html?invoice=${encodeURIComponent(s.inv)}&wa=${waDigits}`;
   const waMsg = encodeURIComponent(
-    `Hi ${s.customer?.name ?? ""}! Here's your Meensha invoice ${s.inv}: ${invoiceUrl}`,
+    `Hi ${s.customer?.name ?? ""}! Here's your Meensha invoice ${s.inv}: ${invoiceUrl}` +
+      (pdfUrl ? `\n\nPDF: ${pdfUrl}` : ""),
   );
   const waLink = waDigits ? `https://wa.me/${waDigits}?text=${waMsg}` : null;
   await tgSend(

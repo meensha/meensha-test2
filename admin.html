@@ -1040,7 +1040,7 @@ td input,td select{padding:4px 7px;border:1px solid var(--bd);border-radius:4px;
 <!-- Invoice -->
 <div class="mo hi" id="MO-INV"><div class="md" style="max-width:720px;">
   <div id="INV-CONTENT"></div><div id="INV-STOCK"></div>
-  <div class="mf"><button class="btn bwa" onclick="sendInvWA()">💬 WhatsApp</button><button class="btn bb" onclick="printInv()">📄 Print/PDF</button><button class="btn bgy" onclick="closeMo('MO-INV')">Close</button></div>
+  <div class="mf"><button class="btn bwa" onclick="sendInvWA()">💬 WhatsApp</button><button class="btn bb" onclick="viewInvPDF()">🧾 View PDF</button><button class="btn bb" onclick="printInv()">📄 Print/PDF</button><button class="btn bgy" onclick="closeMo('MO-INV')">Close</button></div>
 </div></div>
 
 <!-- Edit Sale -->
@@ -3720,9 +3720,13 @@ async function saveSale(){
   const inv2='MSH-'+invCtr;document.getElementById('SA-INV').value=inv2;
   const tt=parseFloat((document.getElementById('SA-TOT').textContent||'').replace(/[^\d.]/g,''))||0,pd=parseFloat(document.getElementById('SA-PAID').value)||0;
   const dm=document.querySelector('input[name="DM"]:checked')?.value||'offline';
-  const saleData={inv:inv2,date:dt,customer:{name:nm,wa:document.getElementById('SA-WA').value},items,total:tt,paid:pd,balance:Math.max(0,tt-pd),pay_mode:document.getElementById('SA-MD').value,razorpay_fee:rzpFee(),notes:document.getElementById('SA-NOT').value,gst_pct:document.getElementById('SA-GST').checked?(parseFloat(document.getElementById('SA-GSTP').value)||0):0,delivery_mode:dm,shipping_status:dm==='shipping'?'pending':'na',shipping_address:document.getElementById('SA-ADDR')?.value||'',created_by:CU.username,source:'manual'};
+  const sub=items.reduce((a,it)=>a+it.amount,0);
+  const gstOn=document.getElementById('SA-GST').checked,gstPct=gstOn?(parseFloat(document.getElementById('SA-GSTP').value)||0):0,gstAmt=gstOn?sub*gstPct/100:0;
+  const taxes=gstOn?[{name:'GST',pct:gstPct,amount:gstAmt}]:[];
+  const saleData={inv:inv2,date:dt,customer:{name:nm,wa:document.getElementById('SA-WA').value},items,subtotal:sub,taxes,total:tt,paid:pd,balance:Math.max(0,tt-pd),pay_mode:document.getElementById('SA-MD').value,razorpay_fee:rzpFee(),notes:document.getElementById('SA-NOT').value,delivery_mode:dm,shipping_status:dm==='shipping'?'pending':'na',shipping_address:document.getElementById('SA-ADDR')?.value||'',created_by:CU.username,source:'manual'};
   const saved=await sbIns('sales',saleData);
   if(saved&&saved[0])saleData.id=saved[0].id;
+  if(saleData.id){try{const pr=await fetch(`${SB}/functions/v1/generate-invoice-pdf`,{method:'POST',headers:HDR(),body:JSON.stringify({sale_id:saleData.id})});const pj=await pr.json();if(pj?.ok)saleData.invoice_pdf_path=pj.path;}catch{}}
   for(const {it,qty} of rowInfo){
     if(!it)continue;
     if(it.source==='legacy'){
@@ -3780,8 +3784,27 @@ function previewInv(){
 }
 function previewInvData(s){curInvSale=s;document.getElementById('INV-CONTENT').innerHTML=buildInvHTML(s);document.getElementById('INV-STOCK').innerHTML=buildStockHTML(s);document.getElementById('MO-INV').classList.remove('hi');}
 function sendInvWA(){if(curInvSale)sendWAFor(curInvSale);}
+async function viewInvPDF(){
+  const s=curInvSale;
+  if(!s?.id){toast('Save the sale first — preview isn\'t a real record yet','var(--red)');return;}
+  toast('Preparing PDF…','var(--gdk)');
+  try{
+    const r=await fetch(`${SB}/functions/v1/generate-invoice-pdf`,{method:'POST',headers:HDR(),body:JSON.stringify({sale_id:s.id})});
+    const j=await r.json();
+    if(j?.ok&&j.url)window.open(j.url,'_blank');
+    else toast('Could not generate PDF: '+(j?.error||'unknown error'),'var(--red)');
+  }catch(e){toast('PDF error: '+(e.message||e),'var(--red)');}
+}
 function sendSaleWA(){previewInv();setTimeout(()=>sendInvWA(),200);}
-function sendWAFor(s){const wa=(s.customer?.wa||'918709525218').replace(/\D/g,'');const msg=encodeURIComponent(`🙏 Dear ${s.customer?.name||''},\n\nThank you for shopping at Meensha!\n\nInvoice: ${s.inv}\nTotal: ₹${fmt(s.total)}\n${s.paid<s.total?'Balance due: ₹'+fmt(s.balance):''}\n\nWe hope you cherish your handloom treasure 🧵\n— Meensha · meensha.in`);window.open(`https://wa.me/${wa}?text=${msg}`,'_blank');}
+async function sendWAFor(s){
+  const wa=(s.customer?.wa||'918709525218').replace(/\D/g,'');
+  let pdfLine='';
+  if(s.id){
+    try{const r=await fetch(`${SB}/functions/v1/generate-invoice-pdf`,{method:'POST',headers:HDR(),body:JSON.stringify({sale_id:s.id})});const j=await r.json();if(j?.ok&&j.url)pdfLine=`\n\n📄 Invoice PDF: ${j.url}`;}catch{}
+  }
+  const msg=encodeURIComponent(`🙏 Dear ${s.customer?.name||''},\n\nThank you for shopping at Meensha!\n\nInvoice: ${s.inv}\nTotal: ₹${fmt(s.total)}\n${s.paid<s.total?'Balance due: ₹'+fmt(s.balance):''}${pdfLine}\n\nWe hope you cherish your handloom treasure 🧵\n— Meensha · meensha.in`);
+  window.open(`https://wa.me/${wa}?text=${msg}`,'_blank');
+}
 function printTags(){
   const selIds=[...document.querySelectorAll('.i-sel:checked')].map(el=>el.value);
   if(!selIds.length){toast('Select at least one item to print tags for','var(--red)');return;}

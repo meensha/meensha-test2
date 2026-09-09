@@ -8,12 +8,12 @@
   body { margin:20px; font-family:Georgia,serif; background:#faf6ee; }
   .msg { max-width:640px; margin:60px auto; text-align:center; color:#8B6914; font-size:14px; }
   .print-btn { display:block; max-width:640px; margin:0 auto 14px; text-align:center; }
-  .print-btn button { font-family:Georgia,serif; background:#8B6914; color:#fff; border:none; padding:10px 22px; border-radius:6px; cursor:pointer; font-size:13px; }
+  .print-btn button, .print-btn a.pdf-btn { font-family:Georgia,serif; background:#8B6914; color:#fff; border:none; padding:10px 22px; border-radius:6px; cursor:pointer; font-size:13px; text-decoration:none; display:inline-block; margin-left:8px; }
   @media print { .print-btn { display:none; } body { background:#fff; margin:0; } }
 </style>
 </head>
 <body>
-<div class="print-btn"><button onclick="window.print()">🖨️ Print / Save as PDF</button></div>
+<div class="print-btn"><button onclick="window.print()">🖨️ Print / Save as PDF</button><a class="pdf-btn" id="pdf-link" href="#" target="_blank" style="display:none;">📄 Download PDF</a></div>
 <div id="content"><p class="msg">Loading your invoice…</p></div>
 
 <script>
@@ -74,6 +74,26 @@ async function loadInvoice() {
       return;
     }
     content.innerHTML = buildInvHTML(s);
+    if (s.id) {
+      // Calls generate-invoice-pdf unconditionally, not just when
+      // invoice_pdf_path is already set — that function is idempotent
+      // (renders on first request, just re-signs on later ones), so this
+      // is what makes PDFs available for sales made before this feature
+      // shipped, not just new ones.
+      try {
+        const pr = await fetch(`${_SB}/functions/v1/generate-invoice-pdf`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', apikey: _SK, Authorization: 'Bearer ' + _SK },
+          body: JSON.stringify({ sale_id: s.id })
+        });
+        const pj = await pr.json();
+        if (pj?.ok && pj.url) {
+          const btn = document.getElementById('pdf-link');
+          btn.href = pj.url;
+          btn.style.display = 'inline-block';
+        }
+      } catch { /* Print/Save as PDF button still works without this */ }
+    }
   } catch (e) {
     content.innerHTML = '<p class="msg">Could not load your invoice right now — please try again shortly.</p>';
     document.querySelector('.print-btn').style.display = 'none';
