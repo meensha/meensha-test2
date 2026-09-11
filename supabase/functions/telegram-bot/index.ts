@@ -119,6 +119,8 @@ Deno.serve(async (req: Request) => {
     await handleGodownPhoto(supabase, chatId, data, photo);
   } else if (photo?.length && state === "inv_item_photos") {
     await handleInventoryPhoto(supabase, chatId, data, photo);
+  } else if (photo?.length && state === "maint_qr_photo") {
+    await handleMaintenanceQrPhoto(supabase, chatId, photo);
   } else if (text && state.startsWith("godown_")) {
     await handleGodownText(supabase, chatId, state, data, text);
   } else if (text && state.startsWith("inv_")) {
@@ -157,6 +159,14 @@ async function tgSend(chatId: number, text: string, replyMarkup?: unknown, parse
   });
 }
 
+async function tgSendPhoto(chatId: number, photoUrl: string, caption?: string) {
+  await fetch(`${TG_API}/sendPhoto`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, photo: photoUrl, caption }),
+  });
+}
+
 async function saveSession(supabase: SB, chatId: number, state: string, data: SessionData) {
   await supabase.from("telegram_sessions").upsert({
     chat_id: chatId,
@@ -188,6 +198,7 @@ async function showMaintenanceMenu(chatId: number) {
       [{ text: "🧾 Sales history", callback_data: "hist:start" }],
       [{ text: "📸 Event photo submissions", callback_data: "evphoto:menu" }],
       [{ text: "📝 Add a note", callback_data: "maint:note" }],
+      [{ text: "🔳 Set UPI QR code", callback_data: "maint:setqr" }],
       [{ text: "🔗 Insta link", callback_data: "maint:iglink" }],
       [{ text: "🎟️ Create voucher", callback_data: "maint:voucher" }],
       [{ text: "📋 Create event form", callback_data: "maint:eventform" }],
@@ -209,6 +220,11 @@ async function handleMaintenance(supabase: SB, chatId: number, callbackData: str
   if (callbackData === "maint:note") {
     await tgSend(chatId, "Type your note:");
     await saveSession(supabase, chatId, "maint_note_text", data);
+    return;
+  }
+  if (callbackData === "maint:setqr") {
+    await tgSend(chatId, "Send the UPI QR code image as a photo:");
+    await saveSession(supabase, chatId, "maint_qr_photo", data);
     return;
   }
   if (callbackData === "maint:iglink") {
@@ -236,6 +252,25 @@ async function handleMaintenanceText(supabase: SB, chatId: number, text: string)
   }
   await supabase.from("bot_notes").insert({ text: note, submitted_by: `chat_id:${chatId}` });
   await tgSend(chatId, "📝 Note saved — it'll show on the dashboard.");
+  await showMaintenanceMenu(chatId);
+  await saveSession(supabase, chatId, "idle", {});
+}
+
+// Staff upload a static UPI QR image here — always overwrites the same
+// fixed object name (there's only ever one active QR), stored in the
+// `qr-codes` bucket and saved into settings.upi_qr_code_url (same
+// key/value pattern as event_photo_submission_enabled above). Kiosk
+// checkout's "UPI Direct" mode reads this back to send the QR to staff
+// alongside the WhatsApp draft (see sendUpiQr).
+async function handleMaintenanceQrPhoto(supabase: SB, chatId: number, photoSizes: { file_id: string }[]) {
+  const largest = photoSizes[photoSizes.length - 1];
+  const result = await uploadTelegramPhoto(largest.file_id, "qr-codes", "upi-qr.jpg");
+  if ("error" in result) {
+    await tgSend(chatId, `Couldn't save that QR code — ${result.error}`);
+    return;
+  }
+  await supabase.from("settings").upsert({ key: "upi_qr_code_url", value: result.url }, { onConflict: "key" });
+  await tgSend(chatId, "🔳 UPI QR code saved — it'll be shown for every UPI Direct sale from now on.");
   await showMaintenanceMenu(chatId);
   await saveSession(supabase, chatId, "idle", {});
 }
@@ -742,6 +777,7 @@ async function handleKiosk(
       return;
     }
     if (callbackData === "kiosk:cartitem:delete") {
+      clearDiscountIfUnitRemoved(data, skuId);
       data.cart = data.cart.filter((c: { sku_id: string }) => c.sku_id !== skuId);
       data.editingSkuId = undefined;
       await showCart(chatId, data);
@@ -756,6 +792,7 @@ async function handleKiosk(
       // before re-asking "how many," or it'd undercount by what's already
       // held. Nothing is written to the database either way; the cart only
       // exists in the session until checkout.
+      clearDiscountIfUnitRemoved(data, skuId);
       data.cart = data.cart.filter((c: { sku_id: string }) => c.sku_id !== skuId);
       data.editingSkuId = undefined;
       if (!sku) {
@@ -833,6 +870,10 @@ async function handleKiosk(
     if (data.pay_mode === "Razorpay") {
       await sendRazorpayLink(supabase, chatId, data);
       return;
+    }
+
+    if (data.pay_mode === "UPI Direct") {
+      await sendUpiQr(supabase, chatId, data);
     }
 
     await askKioskAmount(supabase, chatId, data);
@@ -1080,9 +1121,29 @@ async function handleTextInput(
   }
 
   if (state === "kiosk_discount_custom") {
-    const subtotal = data.cart.reduce((a: number, c: { price: number }) => a + c.price, 0);
     const parsed = parseFloat(text);
-    data.discount = isNaN(parsed) ? 0 : Math.max(0, Math.min(parsed, subtotal));
+    if (isNaN(parsed) || parsed <= 0) {
+      data.discount = 0;
+      data.discountUnitId = undefined;
+      data.appliedCoupon = undefined;
+      await showConfirmation(supabase, chatId, data);
+      return;
+    }
+    // Same attribution as a coupon code — the highest-priced item, capped
+    // to that item's own price (applyCouponToItem does the capping) —
+    // instead of being an item-less whole-order amount that would never
+    // show up anywhere on the itemized invoice. Not a real coupon row, so
+    // clear appliedCoupon right after — finalizeSale's consume_coupon RPC
+    // would otherwise fire with a fake "Custom discount" code.
+    const target = highestPricedCartItem(data);
+    applyCouponToItem(data, { discount_type: "flat", discount_value: parsed, code: "Custom discount" }, target);
+    data.appliedCoupon = undefined;
+    if (data.discount < parsed) {
+      await tgSend(
+        chatId,
+        `⚠️ ₹${parsed} is more than "${target.name}"'s price (₹${target.price}) — capped the discount to -₹${data.discount} on that item.`,
+      );
+    }
     await showConfirmation(supabase, chatId, data);
     return;
   }
@@ -1139,15 +1200,41 @@ function validateCoupon(coupon: any): boolean {
   return true;
 }
 
-// Auto-applies to the highest-priced item in the cart — no extra question.
-// A percent-off coupon gives the biggest rupee value against the pricier
-// item, and this removes an interactive step (and a bug surface) entirely.
-// deno-lint-ignore no-explicit-any
-async function pickDiscountItem(supabase: SB, chatId: number, data: SessionData, coupon: any) {
-  const target = data.cart.reduce(
+// Every discount — coupon code or a staff-typed custom amount — attributes
+// to exactly one item, the highest-priced one in the cart: a percent-off
+// coupon gives the biggest rupee value against the pricier item, and this
+// removes an interactive "which item?" question entirely. Shared so a
+// custom amount gets the exact same attribution/capping as a coupon code
+// instead of being a silently-different, item-less mechanism.
+function highestPricedCartItem(data: SessionData): { price: number; unit_id: string; name: string } {
+  return data.cart.reduce(
     (max: { price: number }, c: { price: number }) => (c.price > max.price ? c : max),
     data.cart[0],
   );
+}
+
+// A discount's unit_id goes stale the moment the item it was attributed to
+// leaves the cart (delete, or a quantity edit that re-adds different
+// physical units under the same SKU) — without this, data.discount stays
+// set and still gets subtracted in orderTotal(), but no remaining item
+// matches discountUnitId, so it silently vanishes from every item's
+// discount field on the finalized sale (invisible on the invoice, though
+// the total is still arithmetically "right").
+function clearDiscountIfUnitRemoved(data: SessionData, skuIdBeingRemoved: string) {
+  if (!data.discountUnitId) return;
+  const discountedUnitStillPresent = data.cart.some(
+    (c: { unit_id: string; sku_id: string }) => c.unit_id === data.discountUnitId && c.sku_id !== skuIdBeingRemoved,
+  );
+  if (!discountedUnitStillPresent) {
+    data.discount = 0;
+    data.discountUnitId = undefined;
+    data.appliedCoupon = undefined;
+  }
+}
+
+// deno-lint-ignore no-explicit-any
+async function pickDiscountItem(supabase: SB, chatId: number, data: SessionData, coupon: any) {
+  const target = highestPricedCartItem(data);
   applyCouponToItem(data, coupon, target);
   await tgSend(chatId, `🎟️ Applied ${coupon.code} to ${target.name} — -₹${data.discount}`);
   await showConfirmation(supabase, chatId, data);
@@ -1256,7 +1343,7 @@ function formatCartLines(data: SessionData): string {
     .map((c: { unit_id: string; name: string; variant?: string; unit_code: string; price: number }) => {
       const base = `• ${c.name}${c.variant ? " (" + c.variant + ")" : ""} — ₹${c.price}`;
       if (data.discountUnitId === c.unit_id && data.discount) {
-        return `${base}\n   ↳ -₹${data.discount} (${data.appliedCoupon?.code ?? "coupon"})`;
+        return `${base}\n   ↳ -₹${data.discount} (${data.appliedCoupon?.code ?? "custom discount"})`;
       }
       return base;
     })
@@ -1332,6 +1419,34 @@ async function sendRazorpayLink(supabase: SB, chatId: number, data: SessionData)
   await saveSession(supabase, chatId, "kiosk_pick_item", data);
 }
 
+// UPI Direct: no payment API, no automatic confirmation — same
+// one-tap-by-a-human pattern as everywhere else in this file. Staff get the
+// static QR image (set via Maintenance → 🔳 Set UPI QR code) as a Telegram
+// photo plus a wa.me draft showing the final amount (orderTotal already
+// includes any discount), and forward both to the customer themselves.
+// Falls back to just the WhatsApp draft if no QR has been uploaded yet —
+// never blocks finalizing the sale (askKioskAmount runs either way).
+async function sendUpiQr(supabase: SB, chatId: number, data: SessionData) {
+  const total = orderTotal(data);
+  const waDigits = String(data.customer_wa ?? "").replace(/\D/g, "");
+  const waMsg = encodeURIComponent(`Hi ${data.customer_name}! Please pay ₹${total} for your Meensha order via UPI.`);
+  const waLink = waDigits ? `https://wa.me/${waDigits}?text=${waMsg}` : null;
+
+  const { data: qrRow } = await supabase.from("settings").select("value").eq("key", "upi_qr_code_url").maybeSingle();
+  const qrUrl = qrRow?.value;
+
+  if (qrUrl) {
+    await tgSendPhoto(chatId, qrUrl, `UPI QR — ₹${total}. Forward this to the customer along with the WhatsApp draft below.`);
+  } else {
+    await tgSend(chatId, "⚠️ No UPI QR code set yet — set one via Maintenance → 🔳 Set UPI QR code. Sending the WhatsApp draft only for now.");
+  }
+
+  await tgSend(
+    chatId,
+    `📲 UPI Direct — ₹${total}` + (waLink ? `\n\nTap to send to customer: ${waLink}` : ""),
+  );
+}
+
 async function finalizeSale(supabase: SB, chatId: number, data: SessionData) {
   const total = orderTotal(data);
   const paid = data.amount ?? total;
@@ -1344,6 +1459,11 @@ async function finalizeSale(supabase: SB, chatId: number, data: SessionData) {
   const nextCtr = (parseInt(ctrRow?.value ?? "1000") || 1000) + 1;
   await supabase.from("settings").update({ value: String(nextCtr) }).eq("key", "inv_counter");
   const inv = "MSH-" + nextCtr;
+
+  // This function only ever finalizes Cash/UPI Direct sales — kiosk
+  // Razorpay sales finalize via razorpay-webhook instead (askPaymentMode's
+  // Razorpay branch returns before reaching here), which is the only place
+  // that does customer_id linking, per the shop owner (Razorpay-specific).
 
   const { data: saleRow } = await supabase
     .from("sales")
@@ -2075,7 +2195,11 @@ async function handleGodownPhoto(supabase: SB, chatId: number, data: SessionData
 // photo handling (not yet built there, but the pattern is simple enough to
 // use here now): resolve Telegram's file_id to a real URL, fetch the bytes,
 // re-upload to the same item-photos bucket admin.html already uses.
-async function uploadTelegramPhoto(fileId: string): Promise<{ url: string } | { error: string }> {
+async function uploadTelegramPhoto(
+  fileId: string,
+  bucket = "item-photos",
+  objectName = `${Date.now()}-inventory-telegram.jpg`,
+): Promise<{ url: string } | { error: string }> {
   const fileRes = await fetch(`${TG_API}/getFile?file_id=${fileId}`);
   const fileJson = await fileRes.json();
   const filePath = fileJson?.result?.file_path;
@@ -2085,9 +2209,8 @@ async function uploadTelegramPhoto(fileId: string): Promise<{ url: string } | { 
   if (!imgRes.ok) return { error: `Telegram file download failed: ${imgRes.status}` };
   const imgBuf = await imgRes.arrayBuffer();
 
-  const objectName = `${Date.now()}-inventory-telegram.jpg`;
   const uploadRes = await fetch(
-    `${Deno.env.get("SUPABASE_URL")}/storage/v1/object/item-photos/${objectName}`,
+    `${Deno.env.get("SUPABASE_URL")}/storage/v1/object/${bucket}/${objectName}`,
     {
       method: "POST",
       headers: {
@@ -2103,7 +2226,7 @@ async function uploadTelegramPhoto(fileId: string): Promise<{ url: string } | { 
     const body = await uploadRes.text();
     return { error: `Storage upload failed: ${uploadRes.status} ${body.slice(0, 200)}` };
   }
-  return { url: `${Deno.env.get("SUPABASE_URL")}/storage/v1/object/public/item-photos/${objectName}` };
+  return { url: `${Deno.env.get("SUPABASE_URL")}/storage/v1/object/public/${bucket}/${objectName}` };
 }
 
 // Shared by the Skip button, the "Done" button after a photo, and typed

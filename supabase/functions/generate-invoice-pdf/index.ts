@@ -42,6 +42,17 @@ function fmt(n: number): string {
   return Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 }
 
+// pdf-lib's StandardFonts (WinAnsi encoding) throw on any character outside
+// that encoding — hit in production by an invisible bidi-formatting mark
+// (U+202A/U+202C) that had landed in a customer name, almost certainly from
+// copy-pasting a number out of WhatsApp, which wraps phone numbers in those
+// marks for RTL/LTR display. Strips Unicode format/control characters
+// (invisible, never legitimately meant to print) from any free-text field
+// before it reaches drawText/widthOfTextAtSize.
+function sanitize(text: string | null | undefined): string {
+  return (text || "").replace(/[\p{Cf}\p{Cc}]/gu, "");
+}
+
 // The four sale-creation paths don't all shape `items` the same way (admin's
 // manual entry writes mrp/salePrice/qty/discount/amount; the bots and the
 // storefront write a leaner name/variant/price/qty shape) — normalize here
@@ -52,8 +63,8 @@ function normItem(it: Item) {
   const mrp = it.mrp ?? salePrice;
   const discount = it.discount ?? 0;
   const amount = it.amount ?? Math.max(0, salePrice * qty - discount);
-  const variant = it.subtype || it.variant || "";
-  return { name: it.name || "", variant, mrp, salePrice, qty, discount, amount };
+  const variant = sanitize(it.subtype || it.variant || "");
+  return { name: sanitize(it.name), variant, mrp, salePrice, qty, discount, amount };
 }
 
 Deno.serve(async (req: Request) => {
@@ -89,7 +100,11 @@ Deno.serve(async (req: Request) => {
       return json({ ok: true, path: sale.invoice_pdf_path, url });
     }
 
-    const sym = /au/i.test(sale.source || "") ? "A$" : "₹";
+    // pdf-lib's StandardFonts use WinAnsi encoding, which cannot encode ₹
+    // (it postdates that encoding) — every drawText call with the real
+    // symbol throws "WinAnsi cannot encode ₹" at render time. "Rs." is the
+    // standard fallback on printed Indian invoices anyway.
+    const sym = /au/i.test(sale.source || "") ? "A$" : "Rs. ";
     const items = (sale.items || []).map(normItem);
     const taxes: { name: string; pct: number; amount: number }[] = sale.taxes || [];
 
@@ -169,13 +184,13 @@ async function buildInvoicePdf(
   y -= bandH + 20;
 
   // Invoice / customer header
-  page.drawText(`Invoice: ${sale.inv || ""}`, { x: margin, y, size: 11, font: bold });
-  page.drawText(`Date: ${sale.date || ""}`, { x: margin, y: y - 15, size: 10, font });
+  page.drawText(`Invoice: ${sanitize(sale.inv)}`, { x: margin, y, size: 11, font: bold });
+  page.drawText(`Date: ${sanitize(sale.date)}`, { x: margin, y: y - 15, size: 10, font });
   if (sale.delivery_mode === "shipping" && sale.shipping_address) {
-    page.drawText(`Ship to: ${sale.shipping_address}`, { x: margin, y: y - 30, size: 10, font });
+    page.drawText(`Ship to: ${sanitize(sale.shipping_address)}`, { x: margin, y: y - 30, size: 10, font });
   }
-  const custName = sale.customer?.name || "";
-  const custWa = sale.customer?.wa || "";
+  const custName = sanitize(sale.customer?.name);
+  const custWa = sanitize(sale.customer?.wa);
   const custLine1 = `To: ${custName}`;
   const custLine2 = custWa;
   page.drawText(custLine1, { x: pageW - margin - bold.widthOfTextAtSize(custLine1, 10), y, size: 10, font: bold });
@@ -255,7 +270,7 @@ async function buildInvoicePdf(
   // Tax lines — only when the sale actually has any (admin-only, off by
   // default; kiosk/storefront sales are never taxed).
   for (const t of taxes) {
-    rightAlign(`${t.name} (${t.pct}%)`, `${sym}${fmt(t.amount)}`);
+    rightAlign(`${sanitize(t.name)} (${t.pct}%)`, `${sym}${fmt(t.amount)}`);
   }
 
   rightAlign("Total", `${sym}${fmt(sale.total)}`, 14, bold, gold);
@@ -268,7 +283,7 @@ async function buildInvoicePdf(
 
   if (sale.notes) {
     y -= 6;
-    page.drawText(sale.notes, { x: margin, y, size: 9, font, color: rgb(0.4, 0.4, 0.4) });
+    page.drawText(sanitize(sale.notes), { x: margin, y, size: 9, font, color: rgb(0.4, 0.4, 0.4) });
     y -= 20;
   }
 

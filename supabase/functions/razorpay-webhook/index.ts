@@ -10,6 +10,7 @@
 // payment_link.paid
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { findCustomerByWa } from "../_shared/customerLink.ts";
 
 Deno.serve(async (req: Request) => {
   if (req.method !== "POST") {
@@ -75,12 +76,20 @@ Deno.serve(async (req: Request) => {
   const inv = "MSH-" + nextCtr;
 
   const razorpayFee = Math.round(order.total * 0.02);
+
+  // Every Razorpay-paid sale (storefront or telegram_kiosk) links to a
+  // customers row when the buyer already has one (matched by WA number) —
+  // customers.email/password_hash are NOT NULL, so a first-time buyer with
+  // no account simply gets no customer_id, same as any Cash/UPI sale.
+  const customerId = await findCustomerByWa(supabase, order.customer?.wa);
+
   const { data: saleRows, error: saleErr } = await supabase
     .from("sales")
     .insert({
       inv,
       date: new Date().toISOString().slice(0, 10),
       customer: order.customer,
+      customer_id: customerId,
       items: order.items,
       total: order.total,
       paid: order.total,
@@ -113,20 +122,22 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  // Best-effort invoice PDF generation — never blocks the webhook's own
-  // response to Razorpay, and Razorpay itself never sees this sale's
-  // invoice link (there's no WhatsApp draft built here, unlike the bots).
+  // Best-effort invoice PDF generation — must not push this handler's
+  // response past Razorpay's webhook timeout, but a plain un-awaited fetch
+  // risks the Edge Function isolate being torn down before it completes.
+  // EdgeRuntime.waitUntil is Supabase's documented way to let background
+  // work finish after the response is already sent.
   if (!saleErr && saleRows) {
-    try {
-      await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/generate-invoice-pdf`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-        },
-        body: JSON.stringify({ sale_id: saleRows.id }),
-      });
-    } catch { /* best-effort, never blocks the webhook response */ }
+    const pdfPromise = fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/generate-invoice-pdf`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+      },
+      body: JSON.stringify({ sale_id: saleRows.id }),
+    }).catch(() => { /* best-effort, never blocks the webhook response */ });
+    // @ts-ignore -- EdgeRuntime is a Supabase-provided global, not in Deno's own types
+    if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(pdfPromise);
   }
 
   // Kiosk-initiated Razorpay sales don't finalize in the bot itself — the
