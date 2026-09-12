@@ -483,16 +483,38 @@ async function handleTextInput(supabase: any, chatId: number, state: string, dat
       break;
     case "intake_qty":
       await saveSession(supabase, chatId, "intake_purchase_price", { ...data, qty: parseInt(text, 10) || 1 });
-      await tgSend(chatId, "Purchase price (A$)? Type 'skip' to leave blank.");
+      await tgSend(chatId, "Purchase price in INR? (This is the sourcing cost, not the AUD sale price — sourcing is always in India regardless of market. Type 'skip' if you don't know it yet.)");
       break;
-    case "intake_purchase_price":
-      await saveSession(supabase, chatId, "intake_sale_price", { ...data, purchase_price: text.toLowerCase() === "skip" ? null : parseFloat(text) });
+    case "intake_purchase_price": {
+      if (text.toLowerCase() === "skip") {
+        await saveSession(supabase, chatId, "intake_sale_price", { ...data, purchase_price: null });
+        await tgSend(chatId, "Proposed sale price (A$)? Type 'skip' to leave blank.");
+        break;
+      }
+      const price = parseFloat(text);
+      if (isNaN(price) || price < 0) {
+        await tgSend(chatId, "Enter a valid number (e.g. 1200), or type 'skip' if you don't know it yet.");
+        break;
+      }
+      await saveSession(supabase, chatId, "intake_sale_price", { ...data, purchase_price: price });
       await tgSend(chatId, "Proposed sale price (A$)? Type 'skip' to leave blank.");
       break;
-    case "intake_sale_price":
-      await saveSession(supabase, chatId, "intake_notes", { ...data, proposed_sale_price: text.toLowerCase() === "skip" ? null : parseFloat(text) });
+    }
+    case "intake_sale_price": {
+      if (text.toLowerCase() === "skip") {
+        await saveSession(supabase, chatId, "intake_notes", { ...data, proposed_sale_price: null });
+        await tgSend(chatId, "Any notes? Type 'skip' if none.");
+        break;
+      }
+      const price = parseFloat(text);
+      if (isNaN(price) || price < 0) {
+        await tgSend(chatId, "Enter a valid number, or type 'skip' if you don't know it yet.");
+        break;
+      }
+      await saveSession(supabase, chatId, "intake_notes", { ...data, proposed_sale_price: price });
       await tgSend(chatId, "Any notes? Type 'skip' if none.");
       break;
+    }
     case "intake_notes": {
       const notes = text.toLowerCase() === "skip" ? null : text;
       await saveSession(supabase, chatId, "intake_photos", { ...data, notes, photos: [] });

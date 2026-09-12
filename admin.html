@@ -165,7 +165,7 @@ td input,td select{padding:4px 7px;border:1px solid var(--bd);border-radius:4px;
 <!-- TABS -->
 <div class="tabs" id="TABS">
   <button class="tab on" onclick="showTab('home',this)" id="tb-home">🏠 Home</button>
-  <button class="tab" onclick="showTab('inv',this)" id="tb-inv">📋 Inventory</button>
+  <button class="tab" onclick="showTab('inv',this)" id="tb-inv">📋 Inventory<span id="PC-BADGE" style="display:none;background:var(--red);color:#fff;border-radius:9px;padding:1px 6px;font-size:10px;font-weight:700;margin-left:5px;"></span></button>
   <button class="tab" onclick="showTab('stock',this)" id="tb-stock">📦 Add Stock</button>
   <button class="tab" onclick="showTab('sale',this)" id="tb-sale">🛍️ New Sale</button>
   <button class="tab" onclick="showTab('sum',this)" id="tb-sum">📈 Summary</button>
@@ -359,6 +359,10 @@ td input,td select{padding:4px 7px;border:1px solid var(--bd);border-radius:4px;
 <!-- ═══ INVENTORY ═══ -->
 <div id="tp-inv" class="tp">
   <div class="sr" id="I-STATS"></div>
+  <div class="card" id="PC-CARD" style="display:none;">
+    <div class="ct">💰 Pending AU Purchase Costs <span id="PC-COUNT"></span></div>
+    <div class="tw"><table><thead><tr><th>SKU Code</th><th>Name</th><th>Variant</th><th>Available</th><th>Cost (₹)</th><th></th></tr></thead><tbody id="PC-BODY"></tbody></table></div>
+  </div>
   <div class="flt">
     <input type="text" id="I-Q" placeholder="🔍 Search..." oninput="renderInv()">
     <select id="I-FAB" onchange="renderInv()"><option value="">All Materials</option></select>
@@ -1701,6 +1705,7 @@ async function initApp(){
   try{const rp=await sbQ('settings','?key=eq.role_permissions');if(rp&&rp.length)rolePerms={...DEFAULT_PERMS,...JSON.parse(rp[0].value||'{}')};}catch{}
   applyRole();
   await loadAll();
+  renderPendingCosts();
   if(CU.role==='super_admin'){loadRzpEnabled();renderTelegramUsers();renderTelegramUsersAu();}
   if(CU.role!=='sales')loadGeneralSettings();
   // The initial SA-BODY row (added on window.onload, before data existed) needs its
@@ -1772,7 +1777,7 @@ function showTab(id,el){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('on'));
   document.getElementById('tp-'+id)?.classList.add('on');
   el?.classList.add('on');
-  const renders={home:renderHome,inv:()=>{renderInvStats();renderInv();populateFabFilter();},stock:()=>{if(document.getElementById('st-overheads').style.display!=='none')renderOVList();},sum:()=>{renderSumStats();renderSales();renderPurch();renderDailyPaymentSummary();},pnl:()=>{renderPnL();renderOH();},vend:()=>{renderVendorStats();renderVendors();renderAllIssues();renderMigrationCard();renderVendorEditRequests();},appr:renderApprovals,coup:renderCoupons,rev:renderRevs,usr:()=>{renderUsers();renderPermissions();},conn:renderConnections,req:renderRequestsTab};
+  const renders={home:renderHome,inv:()=>{renderInvStats();renderInv();populateFabFilter();renderPendingCosts();},stock:()=>{if(document.getElementById('st-overheads').style.display!=='none')renderOVList();},sum:()=>{renderSumStats();renderSales();renderPurch();renderDailyPaymentSummary();},pnl:()=>{renderPnL();renderOH();},vend:()=>{renderVendorStats();renderVendors();renderAllIssues();renderMigrationCard();renderVendorEditRequests();},appr:renderApprovals,coup:renderCoupons,rev:renderRevs,usr:()=>{renderUsers();renderPermissions();},conn:renderConnections,req:renderRequestsTab};
   renders[id]?.();
 }
 
@@ -2750,7 +2755,7 @@ function exportVendorUnitsXL(vuuid){
     'Batch':u.batch,
     'Unit #':u.unit_num,
     'Status':u.status,
-    'Cost ₹':sk?.cost||0,
+    'Cost ₹':sk?.cost==null?'Pending':sk.cost,
     'Sale ₹':sk?.sale_price||0,
     'Photo':u.photo_url||''
   };});
@@ -3257,6 +3262,34 @@ function populateFabFilter(){
   const el=document.getElementById('I-FAB');if(!el)return;
   const cur=el.value;el.innerHTML='<option value="">All Materials</option>'+fabs.map(f=>`<option ${f===cur?'selected':''}>${f}</option>`).join('');
 }
+// ────── Pending AU purchase costs (sourcing cost not yet entered) ──────
+function renderPendingCosts(){
+  const pending=skus.filter(s=>s.au_available&&(s.cost===null||s.cost===undefined));
+  const badge=document.getElementById('PC-BADGE');
+  if(badge){badge.style.display=pending.length?'inline-block':'none';badge.textContent=pending.length;}
+  const card=document.getElementById('PC-CARD');if(!card)return;
+  if(!pending.length){card.style.display='none';return;}
+  card.style.display='block';
+  document.getElementById('PC-COUNT').textContent=`(${pending.length})`;
+  document.getElementById('PC-BODY').innerHTML=pending.map(s=>`<tr>
+    <td style="font-family:monospace;font-size:11px;"><strong>${sanitise(s.sku_code)}</strong></td>
+    <td>${sanitise(s.name)}</td>
+    <td style="color:var(--gy);">${sanitise(s.display_variant||'—')}</td>
+    <td>${skuAvail(s.id)}</td>
+    <td><input type="number" min="0" placeholder="₹" id="PC-IN-${s.id}" style="width:90px;"></td>
+    <td><button class="btn bgn xs" onclick="savePendingCost('${s.id}')">💾 Save</button></td>
+  </tr>`).join('');
+}
+async function savePendingCost(skuId){
+  const inp=document.getElementById('PC-IN-'+skuId);
+  const val=parseFloat(inp?.value);
+  if(isNaN(val)||val<0){toast('Enter a valid cost in ₹','var(--red)');return;}
+  const ok=await sbUpd('inventory_skus','?id=eq.'+skuId,{cost:val,updated_at:new Date().toISOString()});
+  if(!ok){toast('Save failed','var(--red)');return;}
+  const s=skus.find(x=>x.id===skuId);if(s)s.cost=val;
+  toast('✅ Cost saved','#27ae60');
+  renderPendingCosts();renderInvStats();renderInv();
+}
 function renderInvStats(){
   const av=units.filter(u=>u.status==='available').length,sold=units.filter(u=>u.status==='sold').length;
   const val=skus.reduce((a,s)=>a+(s.cost||0)*skuAvail(s.id),0);
@@ -3315,7 +3348,7 @@ function editItem(id){
   document.getElementById('NI-NM').value=s.name;
   document.getElementById('NI-FAB').value=s.display_material||'';
   document.getElementById('NI-SUB').value=s.display_variant||'';
-  document.getElementById('NI-COST').value=s.cost;
+  document.getElementById('NI-COST').value=s.cost==null?'':s.cost;
   document.getElementById('NI-MRP').value=s.mrp;
   document.getElementById('NI-DISC').value=s.disc;
   document.getElementById('NI-SALE').value=s.sale_price;
@@ -3352,7 +3385,8 @@ async function saveItem(){
   const nm=document.getElementById('NI-NM').value.trim();
   if(!nm||editIdx<0){toast('Name required','var(--red)');return;}
   const photos=await uploadTmpPhs('item-photos',niTmpPh);
-  const data={name:nm,display_material:document.getElementById('NI-FAB').value.trim(),display_variant:document.getElementById('NI-SUB').value.trim(),cost:parseFloat(document.getElementById('NI-COST').value)||0,mrp:parseFloat(document.getElementById('NI-MRP').value)||0,disc:parseFloat(document.getElementById('NI-DISC').value)||0,sale_price:parseFloat(document.getElementById('NI-SALE').value)||0,sale_price_aud:parseFloat(document.getElementById('NI-AUD').value)||0,india_available:document.getElementById('NI-IN-AVAIL').checked,au_available:document.getElementById('NI-AU-AVAIL').checked,photos,hero_photo:photos[0]||null,updated_at:new Date().toISOString()};
+  const costRaw=document.getElementById('NI-COST').value.trim();
+  const data={name:nm,display_material:document.getElementById('NI-FAB').value.trim(),display_variant:document.getElementById('NI-SUB').value.trim(),cost:costRaw===''?null:(parseFloat(costRaw)||0),mrp:parseFloat(document.getElementById('NI-MRP').value)||0,disc:parseFloat(document.getElementById('NI-DISC').value)||0,sale_price:parseFloat(document.getElementById('NI-SALE').value)||0,sale_price_aud:parseFloat(document.getElementById('NI-AUD').value)||0,india_available:document.getElementById('NI-IN-AVAIL').checked,au_available:document.getElementById('NI-AU-AVAIL').checked,photos,hero_photo:photos[0]||null,updated_at:new Date().toISOString()};
   const ok=await sbUpd('inventory_skus',`?id=eq.${editIdx}`,data);
   if(!ok){toast('❌ Save failed — check your connection and try again','var(--red)');return;}
   skus=await sbQ('inventory_skus','?order=sku_code');closeMo('MO-ITEM');renderInvStats();renderInv();populateFabFilter();toast('✅ SKU saved','#27ae60');
@@ -3639,11 +3673,11 @@ function resolveSaleItem(val){
   if(!val)return null;
   if(val.startsWith('leg:')){
     const idx=parseInt(val.slice(4));const it=inv[idx];if(!it)return null;
-    return{source:'legacy',idx,id:it.id,name:it.name,subtype:it.subtype||'',cat:it.cat||'',mrp:it.mrp||0,cost:it.cost||0,sale_price:it.sale_price||0,avail:(it.qty||0)-(it.sold||0),photos:it.photos||[]};
+    return{source:'legacy',idx,id:it.id,name:it.name,subtype:it.subtype||'',cat:it.cat||'',mrp:it.mrp||0,cost:it.cost??null,sale_price:it.sale_price||0,avail:(it.qty||0)-(it.sold||0),photos:it.photos||[]};
   }
   if(val.startsWith('sku:')){
     const skuId=val.slice(4);const s=skus.find(x=>x.id===skuId);if(!s)return null;
-    return{source:'sku',skuId,id:s.id,name:s.name,subtype:s.display_variant||'',cat:s.sku_code,mrp:s.mrp||0,cost:s.cost||0,sale_price:s.sale_price||0,avail:skuAvail(s.id),photos:s.photos||[]};
+    return{source:'sku',skuId,id:s.id,name:s.name,subtype:s.display_variant||'',cat:s.sku_code,mrp:s.mrp||0,cost:s.cost??null,sale_price:s.sale_price||0,avail:skuAvail(s.id),photos:s.photos||[]};
   }
   return null;
 }
@@ -3715,7 +3749,7 @@ async function saveSale(){
     if(it&&it.avail<qty){toast(`Not enough stock for ${it.name} (${it.avail} available, ${qty} requested)`,'var(--red)');return;}
     rowInfo.push({it,sp2,qty,d,notes});
   }
-  const items=rowInfo.map(({it,sp2,qty,d,notes})=>({itId:it?.id||null,name:it?.name||'',subtype:it?.subtype||'',cat:it?.cat||'',mrp:it?.mrp||0,cost:it?.cost||0,salePrice:sp2,qty,discount:d,amount:Math.max(0,sp2*qty-d),notes}));
+  const items=rowInfo.map(({it,sp2,qty,d,notes})=>({itId:it?.id||null,name:it?.name||'',subtype:it?.subtype||'',cat:it?.cat||'',mrp:it?.mrp||0,cost:it?.cost??null,salePrice:sp2,qty,discount:d,amount:Math.max(0,sp2*qty-d),notes}));
   invCtr++;await sbUpd('settings','?key=eq.inv_counter',{value:String(invCtr)});
   const inv2='MSH-'+invCtr;document.getElementById('SA-INV').value=inv2;
   const tt=parseFloat((document.getElementById('SA-TOT').textContent||'').replace(/[^\d.]/g,''))||0,pd=parseFloat(document.getElementById('SA-PAID').value)||0;
@@ -3779,12 +3813,12 @@ function buildInvHTML(s){
 }
 function buildStockHTML(s){
   if(!s.items?.length)return'';
-  const rows=s.items.map(it=>{const i2=inv.find(x=>x.id===it.itId||x.name===it.name);const av=i2?((i2.qty||0)-(i2.sold||0)):0;const profit=it.amount-(it.cost||0)*it.qty;return`<tr><td style="padding:5px 8px;">${it.name}${it.subtype?' ('+it.subtype+')':''}</td><td style="padding:5px 8px;text-align:center;">${it.qty}</td><td style="padding:5px 8px;text-align:right;">₹${fmt((it.cost||0)*it.qty)}</td><td style="padding:5px 8px;text-align:right;">₹${fmt(it.amount)}</td><td style="padding:5px 8px;text-align:right;color:${profit>=0?'#27ae60':'#e74c3c'};font-weight:700;">₹${fmt(profit)}</td><td style="padding:5px 8px;text-align:center;color:${av<=2?'#e74c3c':'#27ae60'};font-weight:700;">${av} left</td></tr>`;}).join('');
+  const rows=s.items.map(it=>{const i2=inv.find(x=>x.id===it.itId||x.name===it.name);const av=i2?((i2.qty||0)-(i2.sold||0)):0;const pending=it.cost===null||it.cost===undefined;const costTd=pending?'Pending':'₹'+fmt(it.cost*it.qty);const profitTd=pending?'Pending':'₹'+fmt(it.amount-it.cost*it.qty);const profitColor=pending?'#888':((it.amount-(it.cost||0)*it.qty)>=0?'#27ae60':'#e74c3c');return`<tr><td style="padding:5px 8px;">${it.name}${it.subtype?' ('+it.subtype+')':''}</td><td style="padding:5px 8px;text-align:center;">${it.qty}</td><td style="padding:5px 8px;text-align:right;">${costTd}</td><td style="padding:5px 8px;text-align:right;">₹${fmt(it.amount)}</td><td style="padding:5px 8px;text-align:right;color:${profitColor};font-weight:700;">${profitTd}</td><td style="padding:5px 8px;text-align:center;color:${av<=2?'#e74c3c':'#27ae60'};font-weight:700;">${av} left</td></tr>`;}).join('');
   return`<div style="margin-top:14px;background:#f0fff4;border:1px solid #a7f3d0;border-radius:8px;padding:12px;font-family:Georgia,serif;font-size:12px;"><div style="font-weight:700;color:#065f46;margin-bottom:7px;font-size:10px;text-transform:uppercase;letter-spacing:.12em;">📦 Stock Balance After This Sale (Internal)</div><table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#d1fae5;"><th style="padding:5px 8px;text-align:left;font-size:9px;text-transform:uppercase;">Item</th><th style="padding:5px 8px;text-align:center;">Sold</th><th style="padding:5px 8px;text-align:right;">Cost</th><th style="padding:5px 8px;text-align:right;">Revenue</th><th style="padding:5px 8px;text-align:right;">Profit</th><th style="padding:5px 8px;text-align:center;">Remaining</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function previewInv(){
   const rows=document.querySelectorAll('#SA-BODY tr'),items=[];
-  rows.forEach(r=>{const sel=r.querySelector('select');const itIdx=parseInt(sel?.value);const it=!isNaN(itIdx)?inv[itIdx]:null;const nums=r.querySelectorAll('input[type="number"]');const sp2=parseFloat(nums[0]?.value)||0,qty=parseFloat(nums[1]?.value)||1,d=parseFloat(nums[2]?.value)||0;const notes=r.querySelectorAll('input[type="text"]')[0]?.value||'';items.push({name:it?.name||'Item',subtype:it?.subtype||'',cat:it?.cat||'',mrp:it?.mrp||0,cost:it?.cost||0,salePrice:sp2,qty,discount:d,amount:Math.max(0,sp2*qty-d),notes});});
+  rows.forEach(r=>{const sel=r.querySelector('select');const itIdx=parseInt(sel?.value);const it=!isNaN(itIdx)?inv[itIdx]:null;const nums=r.querySelectorAll('input[type="number"]');const sp2=parseFloat(nums[0]?.value)||0,qty=parseFloat(nums[1]?.value)||1,d=parseFloat(nums[2]?.value)||0;const notes=r.querySelectorAll('input[type="text"]')[0]?.value||'';items.push({name:it?.name||'Item',subtype:it?.subtype||'',cat:it?.cat||'',mrp:it?.mrp||0,cost:it?.cost??null,salePrice:sp2,qty,discount:d,amount:Math.max(0,sp2*qty-d),notes});});
   const tt=parseFloat((document.getElementById('SA-TOT').textContent||'').replace(/[^\d.]/g,''))||0,pd=parseFloat(document.getElementById('SA-PAID').value)||0;
   const fake={inv:document.getElementById('SA-INV').value||'PREVIEW',date:document.getElementById('SA-DT').value||'—',customer:{name:document.getElementById('SA-NM').value||'Customer',wa:document.getElementById('SA-WA').value||''},items,total:tt,paid:pd,balance:Math.max(0,tt-pd),notes:document.getElementById('SA-NOT').value,delivery_mode:document.querySelector('input[name="DM"]:checked')?.value||'offline',shipping_address:document.getElementById('SA-ADDR')?.value||''};
   previewInvData(fake);
@@ -4064,7 +4098,7 @@ async function uploadTmpPhs(bucket,phs){const urls=[];for(const ph of phs){if(ph
 // ═══════════════════════════════════════════════
 // EXPORTS
 // ═══════════════════════════════════════════════
-function exportInvXL(){const wb=XLSX.utils.book_new();const ws=XLSX.utils.aoa_to_sheet([['SKU Code','Name','Material','Variant','Total','Sold','Available','Cost ₹','MRP ₹','Disc%','Sale ₹ (INR)','Sale ₹ (AUD)','Stock Value ₹','Potential Revenue ₹','Status'],...skus.map(s=>{const av=skuAvail(s.id),tot=skuTotal(s.id);return[s.sku_code,s.name,s.display_material||'',s.display_variant||'',tot,skuSold(s.id),av,s.cost,s.mrp,s.disc+'%',s.sale_price,s.sale_price_aud||'',s.cost*av,s.sale_price*av,av<=0?'Sold Out':av<=2?'Low':'Available'];})]);ws['!cols']=[...Array(15)].map(()=>({wch:16}));XLSX.utils.book_append_sheet(wb,ws,'Inventory');XLSX.writeFile(wb,'Meensha_Inventory_'+new Date().toISOString().split('T')[0]+'.xlsx');}
+function exportInvXL(){const wb=XLSX.utils.book_new();const ws=XLSX.utils.aoa_to_sheet([['SKU Code','Name','Material','Variant','Total','Sold','Available','Cost ₹','MRP ₹','Disc%','Sale ₹ (INR)','Sale ₹ (AUD)','Stock Value ₹','Potential Revenue ₹','Status'],...skus.map(s=>{const av=skuAvail(s.id),tot=skuTotal(s.id);return[s.sku_code,s.name,s.display_material||'',s.display_variant||'',tot,skuSold(s.id),av,s.cost==null?'Pending':s.cost,s.mrp,s.disc+'%',s.sale_price,s.sale_price_aud||'',s.cost==null?'Pending':s.cost*av,s.sale_price*av,av<=0?'Sold Out':av<=2?'Low':'Available'];})]);ws['!cols']=[...Array(15)].map(()=>({wch:16}));XLSX.utils.book_append_sheet(wb,ws,'Inventory');XLSX.writeFile(wb,'Meensha_Inventory_'+new Date().toISOString().split('T')[0]+'.xlsx');}
 function exportInvPDF(){const w=window.open('','_blank');const rows=skus.map(s=>{const av=skuAvail(s.id),tot=skuTotal(s.id);return `<tr><td>${s.sku_code}</td><td>${s.name}</td><td>${s.display_material||'—'}</td><td>${av}/${tot}</td><td>₹${fmt(s.mrp)}</td><td>₹${fmt(s.sale_price)}</td><td>${av<=0?'Sold Out':av<=2?'Low':'Available'}</td></tr>`;}).join('');w.document.write(`<html><head><title>Inventory</title><style>body{font-family:Georgia,serif;margin:20px;}table{width:100%;border-collapse:collapse;font-size:12px;}th{background:#1A1208;color:#C9A84C;padding:8px;}td{padding:7px;border-bottom:1px solid #e0d5c0;}h2{color:#8B6914;}</style></head><body><h2>Meensha · Inventory · ${new Date().toLocaleDateString('en-IN')}</h2><table><thead><tr><th>SKU Code</th><th>Name</th><th>Material</th><th>Stock</th><th>MRP</th><th>Sale Price</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table><script>window.print();<\/script></body></html>`);w.document.close();}
 function exportSalesXL(){const wb=XLSX.utils.book_new();const ws=XLSX.utils.aoa_to_sheet([['Invoice','Date','Customer','WhatsApp','Items','Total ₹','Paid ₹','Balance ₹','Mode','Ship Status','Courier','Tracking'],...sales.map(s=>[s.inv,s.date,s.customer?.name,s.customer?.wa,(s.items||[]).map(i=>i.name).join(', '),s.total,s.paid,s.balance,s.delivery_mode,s.shipping_status||'—',s.courier||'—',s.tracking||'—'])]);ws['!cols']=[...Array(12)].map(()=>({wch:18}));XLSX.utils.book_append_sheet(wb,ws,'Sales');XLSX.writeFile(wb,'Meensha_Sales_'+new Date().toISOString().split('T')[0]+'.xlsx');}
 function exportSalesPDF(){const w=window.open('','_blank');const rows=sales.map(s=>`<tr><td>${s.inv}</td><td>${s.date}</td><td>${s.customer?.name||''}</td><td>₹${fmt(s.total)}</td><td style="color:${(s.balance||0)>0?'red':'green'}">₹${fmt(s.balance||0)}</td><td>${s.delivery_mode==='shipping'?'🚚':'🏪'}</td><td>${s.shipping_status||'—'}</td></tr>`).join('');w.document.write(`<html><head><title>Sales</title><style>body{font-family:Georgia,serif;margin:20px;}table{width:100%;border-collapse:collapse;font-size:12px;}th{background:#1A1208;color:#C9A84C;padding:8px;}td{padding:7px;border-bottom:1px solid #e0d5c0;}h2{color:#8B6914;}</style></head><body><h2>Meensha · Sales Report · ${new Date().toLocaleDateString('en-IN')}</h2><table><thead><tr><th>Invoice</th><th>Date</th><th>Customer</th><th>Total</th><th>Balance</th><th>Mode</th><th>Shipping</th></tr></thead><tbody>${rows}</tbody></table><script>window.print();<\/script></body></html>`);w.document.close();}

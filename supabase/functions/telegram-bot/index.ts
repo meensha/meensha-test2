@@ -127,6 +127,8 @@ Deno.serve(async (req: Request) => {
     await handleInventoryText(supabase, chatId, state, data, text);
   } else if (text && state === "maint_note_text") {
     await handleMaintenanceText(supabase, chatId, text);
+  } else if (text && state === "maint_aucost_amount") {
+    await handleMaintenanceAucostText(supabase, chatId, data, text);
   } else if (text && state === "iglink_caption_text") {
     await handleIglinkCaptionText(supabase, chatId, data, text);
   } else if (text && state.startsWith("voucher_")) {
@@ -198,6 +200,7 @@ async function showMaintenanceMenu(chatId: number) {
       [{ text: "🧾 Sales history", callback_data: "hist:start" }],
       [{ text: "📸 Event photo submissions", callback_data: "evphoto:menu" }],
       [{ text: "📝 Add a note", callback_data: "maint:note" }],
+      [{ text: "💰 Pending AU costs", callback_data: "maint:aucost" }],
       [{ text: "🔳 Set UPI QR code", callback_data: "maint:setqr" }],
       [{ text: "🔗 Insta link", callback_data: "maint:iglink" }],
       [{ text: "🎟️ Create voucher", callback_data: "maint:voucher" }],
@@ -242,6 +245,79 @@ async function handleMaintenance(supabase: SB, chatId: number, callbackData: str
     await saveSession(supabase, chatId, "eventform_title", {});
     return;
   }
+  if (callbackData === "maint:aucost") {
+    await showAucostPicker(supabase, chatId);
+    return;
+  }
+  if (callbackData.startsWith("maint:aucost:pick:")) {
+    const skuId = callbackData.slice("maint:aucost:pick:".length);
+    const { data: sku } = await supabase
+      .from("inventory_skus")
+      .select("id, name, display_variant")
+      .eq("id", skuId)
+      .maybeSingle();
+    if (!sku) {
+      await tgSend(chatId, "That item couldn't be found — it may have already been updated.");
+      await showAucostPicker(supabase, chatId);
+      return;
+    }
+    const label = `${sku.name}${sku.display_variant ? " (" + sku.display_variant + ")" : ""}`;
+    await tgSend(chatId, `Purchase price in INR for "${label}"? (sourcing cost)`);
+    await saveSession(supabase, chatId, "maint_aucost_amount", { skuId: sku.id, skuName: label });
+    return;
+  }
+}
+
+// ═══════════════════════════════════════════════
+// MAINTENANCE → PENDING AU COSTS
+// ═══════════════════════════════════════════════
+// AU stock-intake items whose sourcing (INR) cost was skipped at intake time
+// land here as inventory_skus.cost = NULL — "pending", not free. Lets Shalini
+// fill those in from Telegram instead of needing the web admin panel.
+async function showAucostPicker(supabase: SB, chatId: number) {
+  const { data: skus } = await supabase
+    .from("inventory_skus")
+    .select("id, name, display_variant, sku_code")
+    .eq("au_available", true)
+    .is("cost", null);
+  if (!skus || skus.length === 0) {
+    await tgSend(chatId, "✅ No AU items are waiting on a purchase cost right now.");
+    await showMaintenanceMenu(chatId);
+    return;
+  }
+  const { data: units } = await supabase
+    .from("inventory_units")
+    .select("id, sku_id")
+    .eq("status", "available");
+  const availCount: Record<string, number> = {};
+  (units ?? []).forEach((u: { sku_id: string }) => {
+    availCount[u.sku_id] = (availCount[u.sku_id] ?? 0) + 1;
+  });
+  const buttons = skus.map((s: { id: string; name: string; display_variant?: string }) => [{
+    text: `${s.name}${s.display_variant ? " (" + s.display_variant + ")" : ""} — ${availCount[s.id] ?? 0} units`,
+    callback_data: `maint:aucost:pick:${s.id}`,
+  }]);
+  buttons.push([{ text: "◀ Back to maintenance", callback_data: "maint:menu" }]);
+  await tgSend(chatId, `💰 ${skus.length} item(s) waiting on a purchase cost:`, { inline_keyboard: buttons });
+}
+
+async function handleMaintenanceAucostText(supabase: SB, chatId: number, data: SessionData, text: string) {
+  const trimmed = text.trim();
+  if (trimmed.toLowerCase() === "skip") {
+    await tgSend(chatId, "Left as pending — you can fill it in later.");
+    await showMaintenanceMenu(chatId);
+    await saveSession(supabase, chatId, "idle", {});
+    return;
+  }
+  const amount = parseFloat(trimmed);
+  if (isNaN(amount) || amount < 0) {
+    await tgSend(chatId, "Enter a valid INR amount (numbers only), or type 'skip' to leave it pending:");
+    return;
+  }
+  await supabase.from("inventory_skus").update({ cost: amount, updated_at: new Date().toISOString() }).eq("id", data.skuId);
+  await tgSend(chatId, `✅ Purchase cost of ₹${amount} saved for "${data.skuName}".`);
+  await showMaintenanceMenu(chatId);
+  await saveSession(supabase, chatId, "idle", {});
 }
 
 async function handleMaintenanceText(supabase: SB, chatId: number, text: string) {
