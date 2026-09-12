@@ -183,11 +183,22 @@ async function buildInvoicePdf(
   }
   y -= bandH + 20;
 
-  // Invoice / customer header
+  // Invoice / customer header — left column stacks a variable number of
+  // lines (Payment/Ship-to are conditional), so track the offset instead of
+  // hardcoding positions; the final y-decrement must match however many
+  // lines actually got drawn or the items table below collides with them.
+  const headerStartY = y;
   page.drawText(`Invoice: ${sanitize(sale.inv)}`, { x: margin, y, size: 11, font: bold });
-  page.drawText(`Date: ${sanitize(sale.date)}`, { x: margin, y: y - 15, size: 10, font });
+  let leftY = y - 15;
+  page.drawText(`Date: ${sanitize(sale.date)}`, { x: margin, y: leftY, size: 10, font });
+  leftY -= 15;
+  if (sale.pay_mode) {
+    page.drawText(`Payment: ${sanitize(sale.pay_mode)}`, { x: margin, y: leftY, size: 10, font });
+    leftY -= 15;
+  }
   if (sale.delivery_mode === "shipping" && sale.shipping_address) {
-    page.drawText(`Ship to: ${sanitize(sale.shipping_address)}`, { x: margin, y: y - 30, size: 10, font });
+    page.drawText(`Ship to: ${sanitize(sale.shipping_address)}`, { x: margin, y: leftY, size: 10, font });
+    leftY -= 15;
   }
   const custName = sanitize(sale.customer?.name);
   const custWa = sanitize(sale.customer?.wa);
@@ -195,7 +206,7 @@ async function buildInvoicePdf(
   const custLine2 = custWa;
   page.drawText(custLine1, { x: pageW - margin - bold.widthOfTextAtSize(custLine1, 10), y, size: 10, font: bold });
   page.drawText(custLine2, { x: pageW - margin - font.widthOfTextAtSize(custLine2, 10), y: y - 15, size: 10, font });
-  y -= 45;
+  y = Math.min(leftY, headerStartY - 30) - 15;
 
   // Items table
   const cols = [
