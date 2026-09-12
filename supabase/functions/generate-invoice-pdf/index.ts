@@ -269,8 +269,22 @@ async function buildInvoicePdf(
 
   // Tax lines — only when the sale actually has any (admin-only, off by
   // default; kiosk/storefront sales are never taxed).
+  const taxesSum = taxes.reduce((a, t) => a + t.amount, 0);
   for (const t of taxes) {
     rightAlign(`${sanitize(t.name)} (${t.pct}%)`, `${sym}${fmt(t.amount)}`);
+  }
+
+  // Safety net: subtotal + taxes should equal the sale's actual total. When
+  // it doesn't — a discount that predates item-level attribution (older
+  // sales), a manual total adjustment, anything not already accounted for
+  // above — show the gap explicitly rather than silently rendering two
+  // numbers that don't reconcile with nothing bridging them.
+  const unexplainedGap = subtotal + taxesSum - Number(sale.total || 0);
+  if (Math.abs(unexplainedGap) >= 1) {
+    rightAlign(
+      unexplainedGap > 0 ? "Additional Discount" : "Adjustment",
+      `${unexplainedGap > 0 ? "-" : "+"}${sym}${fmt(Math.abs(unexplainedGap))}`,
+    );
   }
 
   rightAlign("Total", `${sym}${fmt(sale.total)}`, 14, bold, gold);
