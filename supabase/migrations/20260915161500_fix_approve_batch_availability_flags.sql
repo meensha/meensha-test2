@@ -1,10 +1,8 @@
--- Fix: admin_approve_purchase_batch always created new SKUs as India-only
--- (sale_price + india default visibility), even for region='australia'
--- batches — meaning an approved AU purchase's item would never actually be
--- sellable on the AU storefront (au_available stayed false, sale_price_aud
--- stayed null). Cost (purchase_price) is unaffected — that's always INR
--- regardless of region, since vendors are India-based; only which price
--- field/availability flag gets set depends on region.
+-- Fix (found by QA verification): the previous version of this function set
+-- au_available/india_available for the CURRENT region only, leaving the
+-- OTHER region's flag at its column default (india_available defaults
+-- true) — so an AU-region batch's new SKU also showed up as India-available
+-- at ₹0. Now explicitly sets both flags every time, one true one false.
 
 CREATE OR REPLACE FUNCTION admin_approve_purchase_batch(
   p_batch_id uuid,
