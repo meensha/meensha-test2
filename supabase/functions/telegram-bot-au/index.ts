@@ -97,8 +97,11 @@ async function showTopMenu(chatId: number) {
     inline_keyboard: [
       [{ text: "🛍️ Kiosk mode (sale)", callback_data: "kiosk:start" }],
       [{ text: "📦 Stock intake (draft)", callback_data: "intake:start" }],
+      [{ text: "➕ Enter inventory (vendor purchase)", callback_data: "inv:start" }],
       [{ text: "📊 Reports", callback_data: "reports:start" }],
       [{ text: "🎟️ Vouchers", callback_data: "vouchers:menu" }],
+      [{ text: "📦 Godown check", callback_data: "godown:start" }],
+      [{ text: "🔧 Maintenance", callback_data: "maint:menu" }],
     ],
   });
 }
@@ -708,11 +711,20 @@ Deno.serve(async (req: Request) => {
     await tgSend(chatId, "Reports:", { inline_keyboard: [
       [{ text: "Today's Sales", callback_data: "reports:today" }],
       [{ text: "Stock Summary", callback_data: "reports:stock" }],
+      [{ text: "🧾 Sales History", callback_data: "hist:start" }],
     ] });
   } else if (callbackData === "reports:today") {
     await reportToday(supabase, chatId);
   } else if (callbackData === "reports:stock") {
     await reportStock(supabase, chatId);
+  } else if (callbackData?.startsWith("hist:")) {
+    await handleSalesHistory(supabase, chatId, data, callbackData);
+  } else if (callbackData?.startsWith("inv:")) {
+    await handleInventoryAu(supabase, chatId, state, data, callbackData);
+  } else if (callbackData?.startsWith("godown:")) {
+    await handleGodown(supabase, chatId, state, data, callbackData);
+  } else if (callbackData?.startsWith("maint:")) {
+    await handleMaintenanceAu(supabase, chatId, callbackData, data);
   } else if (callbackData === "vouchers:menu") {
     await showVouchersMenu(chatId);
   } else if (callbackData === "vouchers:back") {
@@ -732,6 +744,16 @@ Deno.serve(async (req: Request) => {
     const actorFrom = update.callback_query?.from;
     const actor = [actorFrom?.first_name, actorFrom?.last_name].filter(Boolean).join(" ") || actorFrom?.username || `Chat ${chatId}`;
     await handleRequestAction(supabase, chatId, callbackData, actor, tgSend);
+  } else if (photo?.length && state === "godown_discrepancy_note") {
+    await handleGodownPhoto(supabase, chatId, data, photo);
+  } else if (photo?.length && state === "inv_item_photos") {
+    await handleInventoryPhotoAu(supabase, chatId, data, photo);
+  } else if (text && state.startsWith("godown_")) {
+    await handleGodownText(supabase, chatId, state, data, text);
+  } else if (text && state.startsWith("inv_")) {
+    await handleInventoryTextAu(supabase, chatId, state, data, text);
+  } else if (text && state === "maint_note_text") {
+    await handleMaintenanceTextAu(supabase, chatId, text);
   } else if (photo) {
     await handlePhoto(supabase, chatId, state, data, photo);
   } else {
@@ -747,3 +769,787 @@ Deno.serve(async (req: Request) => {
 
   return new Response("ok", { status: 200 });
 });
+
+// ── Sales History (ported from telegram-bot/index.ts, AU-scoped) ───────────
+const HIST_PAGE_SIZE_AU = 5;
+
+async function handleSalesHistory(supabase: any, chatId: number, data: any, callbackData: string) {
+  if (callbackData === "hist:start") {
+    data.histOffset = 0;
+    await showSalesHistoryPage(supabase, chatId, data);
+    await saveSession(supabase, chatId, "hist_list", data);
+    return;
+  }
+  if (callbackData.startsWith("hist:page:")) {
+    data.histOffset = parseInt(callbackData.split(":")[2], 10);
+    await showSalesHistoryPage(supabase, chatId, data);
+    await saveSession(supabase, chatId, "hist_list", data);
+    return;
+  }
+  if (callbackData.startsWith("hist:view:")) {
+    await showSaleSummary(supabase, chatId, callbackData.split(":")[2]);
+    return;
+  }
+  if (callbackData.startsWith("hist:invoice:")) {
+    await sendHistoryInvoiceLink(supabase, chatId, callbackData.split(":")[2]);
+    return;
+  }
+  if (callbackData === "hist:back") {
+    await showSalesHistoryPage(supabase, chatId, data);
+    await saveSession(supabase, chatId, "hist_list", data);
+    return;
+  }
+  if (callbackData === "hist:exit") {
+    await showTopMenu(chatId);
+    await saveSession(supabase, chatId, "idle", {});
+    return;
+  }
+}
+
+async function showSalesHistoryPage(supabase: any, chatId: number, data: any) {
+  const offset = data.histOffset ?? 0;
+  const { data: rows, count } = await supabase
+    .from("sales")
+    .select("id, inv, date, customer, total", { count: "exact" })
+    .eq("source", "telegram_au")
+    .order("created_at", { ascending: false })
+    .range(offset, offset + HIST_PAGE_SIZE_AU - 1);
+
+  if (!rows?.length) {
+    await tgSend(chatId, offset === 0 ? "No sales recorded yet." : "No more sales.", {
+      inline_keyboard: [[{ text: "✕ Exit", callback_data: "hist:exit" }]],
+    });
+    return;
+  }
+
+  const buttons = rows.map((s: any) => [
+    { text: `${s.inv} · ${s.customer?.name ?? "—"} · ${fmtAud(s.total)} · ${s.date}`, callback_data: `hist:view:${s.id}` },
+  ]);
+  const navRow = [];
+  if (offset > 0) navRow.push({ text: "◀ Prev 5", callback_data: `hist:page:${Math.max(0, offset - HIST_PAGE_SIZE_AU)}` });
+  if ((count ?? 0) > offset + HIST_PAGE_SIZE_AU) navRow.push({ text: "Next 5 ▶", callback_data: `hist:page:${offset + HIST_PAGE_SIZE_AU}` });
+  if (navRow.length) buttons.push(navRow);
+  buttons.push([{ text: "✕ Exit", callback_data: "hist:exit" }]);
+
+  await tgSend(chatId, "🧾 Recent sales — tap one for details:", { inline_keyboard: buttons });
+}
+
+async function showSaleSummary(supabase: any, chatId: number, saleId: string) {
+  const { data: s } = await supabase
+    .from("sales")
+    .select("inv, date, customer, items, total, paid, balance, pay_mode")
+    .eq("id", saleId)
+    .single();
+  if (!s) {
+    await tgSend(chatId, "That sale couldn't be found — it may have been removed.", {
+      inline_keyboard: [[{ text: "◀ Back to list", callback_data: "hist:back" }]],
+    });
+    return;
+  }
+  const lines = (s.items ?? [])
+    .map((it: any) => `• ${it.name}${it.variant ? " (" + it.variant + ")" : ""} — ${fmtAud(it.price)}`)
+    .join("\n");
+  await tgSend(
+    chatId,
+    `${s.inv} — ${s.date}\nCustomer: ${s.customer?.name ?? "—"} (${s.customer?.wa ?? "—"})\n\n${lines}\n\nTotal: ${fmtAud(s.total)}\nPaid: ${fmtAud(s.paid)}\nBalance: ${fmtAud(s.balance)}\nPayment: ${s.pay_mode ?? "—"}`,
+    {
+      inline_keyboard: [
+        [{ text: "🧾 Send Invoice", callback_data: `hist:invoice:${saleId}` }],
+        [{ text: "◀ Back to list", callback_data: "hist:back" }],
+      ],
+    },
+  );
+}
+
+async function sendHistoryInvoiceLink(supabase: any, chatId: number, saleId: string) {
+  const { data: s } = await supabase.from("sales").select("inv, customer, total, paid, invoice_pdf_path").eq("id", saleId).single();
+  if (!s) {
+    await tgSend(chatId, "That sale couldn't be found.");
+    return;
+  }
+  let pdfUrl: string | null = null;
+  try {
+    const pdfRes = await fetch(`${SB_URL}/functions/v1/generate-invoice-pdf`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${SB_SERVICE_KEY}` },
+      body: JSON.stringify({ sale_id: saleId }),
+    });
+    const pdfJson = await pdfRes.json();
+    if (pdfJson?.ok) pdfUrl = pdfJson.url ?? null;
+  } catch { /* best-effort, never blocks the history lookup */ }
+  const waDigits = String(s.customer?.wa ?? "").replace(/\D/g, "");
+  const invoiceUrl = `https://meensha.in/invoice.html?invoice=${encodeURIComponent(s.inv)}&wa=${waDigits}`;
+  const waMsg = encodeURIComponent(
+    `Hi ${s.customer?.name ?? ""}! Here's your Meensha invoice ${s.inv}: ${invoiceUrl}` + (pdfUrl ? `\n\nPDF: ${pdfUrl}` : ""),
+  );
+  const waLink = waDigits ? `https://wa.me/${waDigits}?text=${waMsg}` : null;
+  await tgSend(
+    chatId,
+    `🧾 View/print invoice yourself: ${invoiceUrl}` + (waLink ? `\n\nTap to send to customer: ${waLink}` : ""),
+    { inline_keyboard: [[{ text: "◀ Back to list", callback_data: "hist:back" }]] },
+  );
+}
+
+// ── Godown check (ported from telegram-bot/index.ts, AU-scoped) ────────────
+const GODOWN_EXIT_ROW_AU = [{ text: "✕ Exit", callback_data: "godown:exit" }];
+
+async function handleGodown(supabase: any, chatId: number, state: string, data: any, callbackData: string) {
+  if (callbackData === "godown:exit") {
+    await tgSend(chatId, "Exited godown check.");
+    await showTopMenu(chatId);
+    await saveSession(supabase, chatId, "idle", {});
+    return;
+  }
+
+  if (callbackData === "godown:start") {
+    data = {};
+    await tgSend(chatId, "📦 Godown check — what do you want to do?", {
+      inline_keyboard: [
+        [{ text: "📊 End-of-day reconciliation", callback_data: "godown:eod" }],
+        [{ text: "🔍 Spot check an item", callback_data: "godown:spot" }],
+        GODOWN_EXIT_ROW_AU,
+      ],
+    });
+    await saveSession(supabase, chatId, "godown_menu", data);
+    return;
+  }
+
+  if (callbackData === "godown:eod") {
+    await startGodownEod(supabase, chatId, data);
+    return;
+  }
+
+  if (callbackData === "godown:spot") {
+    await tgSend(chatId, "Type an item name to search:", { inline_keyboard: [GODOWN_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "godown_spot_search", data);
+    return;
+  }
+
+  if (callbackData.startsWith("godown:spotpick:")) {
+    const skuId = callbackData.split(":")[2];
+    const { data: sku } = await supabase.from("inventory_skus").select("id, name").eq("id", skuId).single();
+    const { data: units } = await supabase.from("inventory_units").select("id").eq("sku_id", skuId).eq("status", "available");
+    data.spotItem = { sku_id: sku.id, name: sku.name, avail: (units ?? []).length };
+    await showGodownItem(supabase, chatId, data, data.spotItem);
+    await saveSession(supabase, chatId, "godown_spot_item", data);
+    return;
+  }
+
+  if ((state === "godown_eod_item" || state === "godown_spot_item") && callbackData === "godown:match") {
+    await advanceGodown(supabase, chatId, state, data);
+    return;
+  }
+
+  if ((state === "godown_eod_item" || state === "godown_spot_item") && callbackData === "godown:discrepancy") {
+    data.discFromState = state;
+    data.discItem = state === "godown_eod_item" ? data.eodList[data.eodIdx] : data.spotItem;
+    await tgSend(chatId, "What kind of discrepancy?", {
+      inline_keyboard: [
+        [{ text: "📉 Missing", callback_data: "godown:disc:missing" }],
+        [{ text: "🔨 Damaged", callback_data: "godown:disc:damage" }],
+        [{ text: "📈 Extra", callback_data: "godown:disc:extra" }],
+        GODOWN_EXIT_ROW_AU,
+      ],
+    });
+    await saveSession(supabase, chatId, "godown_discrepancy_type", data);
+    return;
+  }
+
+  if (state === "godown_discrepancy_type" && callbackData.startsWith("godown:disc:")) {
+    const typeMap: Record<string, string> = { missing: "shortage", damage: "damage", extra: "other" };
+    data.discType = typeMap[callbackData.split(":")[2]] ?? "other";
+    data.selectedUnitIds = [];
+    if (data.discType === "other") {
+      await promptGodownNote(chatId);
+      await saveSession(supabase, chatId, "godown_discrepancy_note", data);
+    } else {
+      await showGodownUnitPicker(supabase, chatId, data);
+    }
+    return;
+  }
+
+  if (state === "godown_unit_pick" && callbackData.startsWith("godown:unitpick:")) {
+    const val = callbackData.split(":")[2];
+    if (val === "done") {
+      await promptGodownNote(chatId);
+      await saveSession(supabase, chatId, "godown_discrepancy_note", data);
+      return;
+    }
+    const selected: string[] = data.selectedUnitIds ?? [];
+    data.selectedUnitIds = selected.includes(val) ? selected.filter((x: string) => x !== val) : [...selected, val];
+    await showGodownUnitPicker(supabase, chatId, data);
+    return;
+  }
+
+  if (state === "godown_discrepancy_note" && (callbackData === "godown:disc:skip" || callbackData === "godown:disc:notedone")) {
+    await finalizeGodownDiscrepancy(supabase, chatId, data, "");
+    return;
+  }
+}
+
+async function promptGodownNote(chatId: number) {
+  await tgSend(chatId, "Add a note, attach a photo, or tap Skip:", {
+    inline_keyboard: [[{ text: "⏭ Skip", callback_data: "godown:disc:skip" }], GODOWN_EXIT_ROW_AU],
+  });
+}
+
+async function showGodownUnitPicker(supabase: any, chatId: number, data: any) {
+  const item = data.discItem;
+  const { data: units } = await supabase.from("inventory_units").select("id, unit_code").eq("sku_id", item.sku_id).eq("status", "available");
+  const selected: string[] = data.selectedUnitIds ?? [];
+  const buttons = (units ?? []).map((u: any) => [{
+    text: `${selected.includes(u.id) ? "✅ " : ""}${u.unit_code}`,
+    callback_data: `godown:unitpick:${u.id}`,
+  }]);
+  buttons.push([{ text: `➡️ Done (${selected.length} selected)`, callback_data: "godown:unitpick:done" }]);
+  buttons.push(GODOWN_EXIT_ROW_AU);
+  await tgSend(chatId, `Which piece(s) of "${item.name}" is this about? (optional — tap Done to skip)`, { inline_keyboard: buttons });
+  await saveSession(supabase, chatId, "godown_unit_pick", data);
+}
+
+async function handleGodownPhoto(supabase: any, chatId: number, data: any, photoSizes: any[]) {
+  const largest = photoSizes[photoSizes.length - 1];
+  const result = await uploadTelegramPhotoGodown(largest.file_id);
+  if ("error" in result) {
+    await tgSend(chatId, `Couldn't save that photo — ${result.error}`);
+    return;
+  }
+  data.discPhotoUrl = result.url;
+  await tgSend(chatId, "📷 Photo attached. Add a text note too, or tap Done to save.", {
+    inline_keyboard: [[{ text: "✅ Done", callback_data: "godown:disc:notedone" }], GODOWN_EXIT_ROW_AU],
+  });
+  await saveSession(supabase, chatId, "godown_discrepancy_note", data);
+}
+
+async function uploadTelegramPhotoGodown(fileId: string, bucket = "item-photos", objectName = `${Date.now()}-inventory-telegram-au.jpg`): Promise<{ url: string } | { error: string }> {
+  const fileRes = await fetch(`${TG_API}/getFile?file_id=${fileId}`);
+  const fileJson = await fileRes.json();
+  const filePath = fileJson?.result?.file_path;
+  if (!filePath) return { error: `Telegram getFile failed: ${JSON.stringify(fileJson).slice(0, 200)}` };
+  const imgRes = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`);
+  if (!imgRes.ok) return { error: `Telegram file download failed: ${imgRes.status}` };
+  const imgBuf = await imgRes.arrayBuffer();
+  const uploadRes = await fetch(`${SB_URL}/storage/v1/object/${bucket}/${objectName}`, {
+    method: "POST",
+    headers: { apikey: SB_SERVICE_KEY, Authorization: `Bearer ${SB_SERVICE_KEY}`, "Content-Type": "image/jpeg", "x-upsert": "true" },
+    body: imgBuf,
+  });
+  if (!uploadRes.ok) {
+    const body = await uploadRes.text();
+    return { error: `Storage upload failed: ${uploadRes.status} ${body.slice(0, 200)}` };
+  }
+  return { url: `${SB_URL}/storage/v1/object/public/${bucket}/${objectName}` };
+}
+
+async function finalizeGodownDiscrepancy(supabase: any, chatId: number, data: any, note: string) {
+  const item = data.discItem;
+  const selectedUnitIds: string[] = data.selectedUnitIds ?? [];
+
+  const { data: unitRow } = await supabase.from("inventory_units").select("vendor_code").eq("sku_id", item.sku_id).order("created_at", { ascending: false }).limit(1).maybeSingle();
+  const vendorCode: string | null = unitRow?.vendor_code ?? null;
+  let vendorUuid: string | null = null;
+  if (vendorCode) {
+    const { data: vRow } = await supabase.from("vendors").select("id").eq("vendor_id", vendorCode).maybeSingle();
+    vendorUuid = vRow?.id ?? null;
+  }
+
+  const cleanNote = note.trim();
+  const photoLine = data.discPhotoUrl ? `\nPhoto: ${data.discPhotoUrl}` : "";
+  const source = data.discFromState === "godown_eod_item" ? "EOD reconciliation" : "spot check";
+  const description = `${cleanNote || "(no note)"}${photoLine} — found during ${source} via Telegram bot (AU)`;
+
+  if (vendorUuid) {
+    await supabase.from("vendor_issues").insert({
+      vendor_uuid: vendorUuid, vendor_code: vendorCode, sku_id: item.sku_id, batch: null,
+      unit_ids: selectedUnitIds, issue_date: new Date().toISOString().slice(0, 10),
+      issue_type: data.discType ?? "other", description, status: "open", created_by: "telegram_bot_au",
+    });
+    const pieceNote = selectedUnitIds.length ? ` (${selectedUnitIds.length} piece${selectedUnitIds.length > 1 ? "s" : ""})` : "";
+    await tgSend(chatId, `⚠️ Logged: ${item.name}${pieceNote} — added to Vendor Issues for follow-up.`);
+  } else {
+    await tgSend(chatId, `⚠️ Couldn't resolve a vendor for ${item.name} — please log this one manually in admin.html's Vendor Issues.`);
+  }
+
+  if (data.discType === "damage" && selectedUnitIds.length) {
+    await supabase.from("inventory_units").update({ status: "damaged", updated_at: new Date().toISOString() }).in("id", selectedUnitIds);
+  }
+
+  data.discPhotoUrl = undefined;
+  data.selectedUnitIds = undefined;
+  await advanceGodown(supabase, chatId, data.discFromState, data);
+}
+
+async function handleGodownText(supabase: any, chatId: number, state: string, data: any, text: string) {
+  if (state === "godown_spot_search") {
+    const q = text.trim();
+    const { data: skus } = await supabase.from("inventory_skus").select("id, name").eq("au_available", true).ilike("name", `%${q}%`);
+    if (!skus?.length) {
+      await tgSend(chatId, "No AU items matched that name — try again, or Exit.", { inline_keyboard: [GODOWN_EXIT_ROW_AU] });
+      return;
+    }
+    const { data: units } = await supabase.from("inventory_units").select("sku_id").eq("status", "available");
+    const availCount: Record<string, number> = {};
+    (units ?? []).forEach((u: any) => { availCount[u.sku_id] = (availCount[u.sku_id] ?? 0) + 1; });
+    const buttons = skus.map((s: any) => [{ text: `${s.name} (${availCount[s.id] ?? 0} in stock)`, callback_data: `godown:spotpick:${s.id}` }]);
+    buttons.push(GODOWN_EXIT_ROW_AU);
+    await tgSend(chatId, "Matching items:", { inline_keyboard: buttons });
+    return;
+  }
+
+  if (state === "godown_discrepancy_note") {
+    await finalizeGodownDiscrepancy(supabase, chatId, data, text.trim());
+    return;
+  }
+}
+
+async function startGodownEod(supabase: any, chatId: number, data: any) {
+  const today = new Date().toISOString().slice(0, 10);
+  const { data: todaySales } = await supabase.from("sales").select("items").eq("date", today).eq("source", "telegram_au");
+
+  const nameCounts: Record<string, number> = {};
+  (todaySales ?? []).forEach((s: any) => {
+    (s.items ?? []).forEach((it: any) => { nameCounts[it.name] = (nameCounts[it.name] ?? 0) + 1; });
+  });
+  const soldNames = Object.keys(nameCounts);
+  if (!soldNames.length) {
+    await tgSend(chatId, "No AU sales recorded today — nothing to reconcile yet.");
+    await showTopMenu(chatId);
+    await saveSession(supabase, chatId, "idle", {});
+    return;
+  }
+
+  const { data: skus } = await supabase.from("inventory_skus").select("id, name").eq("au_available", true).in("name", soldNames);
+  const { data: units } = await supabase.from("inventory_units").select("sku_id").eq("status", "available");
+  const availCount: Record<string, number> = {};
+  (units ?? []).forEach((u: any) => { availCount[u.sku_id] = (availCount[u.sku_id] ?? 0) + 1; });
+
+  data.eodList = (skus ?? []).map((s: any) => ({
+    sku_id: s.id, name: s.name, soldToday: nameCounts[s.name] ?? 0, avail: availCount[s.id] ?? 0,
+  }));
+  data.eodIdx = 0;
+  await showGodownItem(supabase, chatId, data, data.eodList[0]);
+  await saveSession(supabase, chatId, "godown_eod_item", data);
+}
+
+async function showGodownItem(supabase: any, chatId: number, data: any, item: any) {
+  const soldLine = item.soldToday !== undefined ? `Sold today: ${item.soldToday}\n` : "";
+  await tgSend(chatId, `🇦🇺 ${item.name}\n${soldLine}Expected in stock: ${item.avail}\n\nDoes the physical count match?`, {
+    inline_keyboard: [
+      [{ text: "✅ Matches", callback_data: "godown:match" }],
+      [{ text: "⚠️ Discrepancy", callback_data: "godown:discrepancy" }],
+      GODOWN_EXIT_ROW_AU,
+    ],
+  });
+}
+
+async function advanceGodown(supabase: any, chatId: number, fromState: string, data: any) {
+  if (fromState === "godown_eod_item") {
+    data.eodIdx = (data.eodIdx ?? 0) + 1;
+    const list = data.eodList ?? [];
+    if (data.eodIdx >= list.length) {
+      await tgSend(chatId, "✅ End-of-day reconciliation complete.");
+      await showTopMenu(chatId);
+      await saveSession(supabase, chatId, "idle", {});
+      return;
+    }
+    await showGodownItem(supabase, chatId, data, list[data.eodIdx]);
+    await saveSession(supabase, chatId, "godown_eod_item", data);
+    return;
+  }
+  await tgSend(chatId, "Type another item name to search, or Exit.", { inline_keyboard: [GODOWN_EXIT_ROW_AU] });
+  await saveSession(supabase, chatId, "godown_spot_search", data);
+}
+
+// ── Maintenance menu (ported subset — AU-relevant items only; India's
+// "Pending AU costs" is India-side reconciliation about AU intake and
+// doesn't apply here; UPI QR and Insta-link weren't ported this pass) ──────
+async function showMaintenanceMenuAu(chatId: number) {
+  await tgSend(chatId, "Maintenance:", {
+    inline_keyboard: [
+      [{ text: "📝 Add a note", callback_data: "maint:note" }],
+      [{ text: "◀ Back to menu", callback_data: "maint:back" }],
+    ],
+  });
+}
+
+async function handleMaintenanceAu(supabase: any, chatId: number, callbackData: string, data: any) {
+  if (callbackData === "maint:menu") {
+    await showMaintenanceMenuAu(chatId);
+    return;
+  }
+  if (callbackData === "maint:back") {
+    await showTopMenu(chatId);
+    await saveSession(supabase, chatId, "idle", {});
+    return;
+  }
+  if (callbackData === "maint:note") {
+    await tgSend(chatId, "Type your note:");
+    await saveSession(supabase, chatId, "maint_note_text", data);
+    return;
+  }
+}
+
+async function handleMaintenanceTextAu(supabase: any, chatId: number, text: string) {
+  const note = text.trim();
+  if (!note) {
+    await tgSend(chatId, "Note can't be empty — type your note:");
+    return;
+  }
+  await supabase.from("bot_notes").insert({ text: note, submitted_by: `chat_id_au:${chatId}` });
+  await tgSend(chatId, "📝 Note saved — it'll show on the dashboard.");
+  await showMaintenanceMenuAu(chatId);
+  await saveSession(supabase, chatId, "idle", {});
+}
+
+// ── Enter Inventory (vendor-batch, ported from telegram-bot/index.ts) ──────
+// Replaces the old single-item Stock Intake flow above (intake:* — left
+// untouched/still reachable) with the same staged vendor-batch flow India
+// got: vendor search/create → item entry loop (+ defect flagging, split
+// into a good row + defective row) → summary (edit/remove/add) → payment →
+// submit_purchase_intake_batch (region "australia") → admin approval on the
+// web dashboard, same as India. Nothing here is live inventory until
+// approved — admin_approve_purchase_batch (shared RPC) handles both regions.
+const INV_EXIT_ROW_AU = [{ text: "✕ Exit", callback_data: "inv:exit" }];
+
+async function handleInventoryAu(supabase: any, chatId: number, state: string, data: any, callbackData: string) {
+  if (callbackData === "inv:start") {
+    data = { items: [] };
+    await tgSend(chatId, "Search vendor by name or WhatsApp number:", {
+      inline_keyboard: [[{ text: "➕ New Vendor", callback_data: "inv:newvendor" }], INV_EXIT_ROW_AU],
+    });
+    await saveSession(supabase, chatId, "inv_vendor_search", data);
+    return;
+  }
+  if (callbackData === "inv:exit") {
+    await tgSend(chatId, "Exited Enter Inventory — nothing was saved.");
+    await showTopMenu(chatId);
+    await saveSession(supabase, chatId, "idle", {});
+    return;
+  }
+  if (callbackData === "inv:newvendor") {
+    data.newVendor = {};
+    await tgSend(chatId, "New vendor — Name?", { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_vendor_new_name", data);
+    return;
+  }
+  if (callbackData.startsWith("inv:vendor:")) {
+    const vendorId = callbackData.split(":")[2];
+    const { data: v } = await supabase.from("vendors").select("id,name").eq("id", vendorId).single();
+    if (!v) { await tgSend(chatId, "That vendor is gone — try search again."); return; }
+    data.vendor_uuid = v.id;
+    data.vendor_name = v.name;
+    await startItemEntryAu(supabase, chatId, data);
+    return;
+  }
+  if (callbackData === "inv:defect:no") { await finishCurrentItemAu(supabase, chatId, data); return; }
+  if (callbackData === "inv:defect:yes") {
+    await tgSend(chatId, `How many of the ${data.curItem.qty} are defective?`, { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_item_defect_qty", data);
+    return;
+  }
+  if (callbackData === "inv:additem") { await startItemEntryAu(supabase, chatId, data); return; }
+  if (callbackData === "inv:review") { await showInvSummaryAu(supabase, chatId, data); return; }
+  if (callbackData.startsWith("inv:removerow:")) {
+    data.items.splice(parseInt(callbackData.split(":")[2], 10), 1);
+    await showInvSummaryAu(supabase, chatId, data);
+    return;
+  }
+  if (callbackData.startsWith("inv:editrow:")) {
+    data.editIdx = parseInt(callbackData.split(":")[2], 10);
+    await tgSend(chatId, "Edit which field?", {
+      inline_keyboard: [
+        [{ text: "Name", callback_data: "inv:editfield:name" }, { text: "Material", callback_data: "inv:editfield:material" }],
+        [{ text: "Variant", callback_data: "inv:editfield:variant" }, { text: "Cost", callback_data: "inv:editfield:cost" }],
+        [{ text: "Qty", callback_data: "inv:editfield:qty" }, { text: "Sale price", callback_data: "inv:editfield:mrp" }],
+        [{ text: "◀ Back to summary", callback_data: "inv:review" }],
+        INV_EXIT_ROW_AU,
+      ],
+    });
+    await saveSession(supabase, chatId, "inv_edit_pick_field", data);
+    return;
+  }
+  if (callbackData.startsWith("inv:editfield:")) {
+    data.editField = callbackData.split(":")[2];
+    await tgSend(chatId, `New value for ${data.editField}?`, { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_edit_value", data);
+    return;
+  }
+  if (callbackData === "inv:submit") {
+    if (!data.items?.length) { await tgSend(chatId, "Add at least one item first."); return; }
+    await tgSend(chatId, "Amount paid (₹ — vendor cost is always INR, even for AU purchases)?", { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_payment_amount", data);
+    return;
+  }
+  if (callbackData.startsWith("inv:paymode:")) {
+    data.paymentMode = callbackData.split(":")[2];
+    await tgSend(chatId, `Split — Meenakshi's share (₹)? Total paid: ₹${data.paymentAmount}. Type 'skip' for an even 50/50 split.`, { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_payment_split", data);
+    return;
+  }
+  if (callbackData === "inv:finalsubmit") {
+    const items = data.items.map((it: any) => ({
+      proposed_name: it.name, proposed_material: it.material, proposed_variant: it.variant,
+      proposed_sale_price: it.mrp, purchase_price: it.cost, qty: it.qty, photo_urls: it.photos || [],
+      is_defective: !!it.is_defective, defect_qty: it.defect_qty || null, defect_reason: it.defect_reason || null,
+    }));
+    const payment = { mode: data.paymentMode, amount_paid: data.paymentAmount, split: data.paymentSplit };
+    const { error } = await supabase.rpc("submit_purchase_intake_batch", {
+      p_vendor_uuid: data.vendor_uuid, p_items: items, p_payment: payment,
+      p_submitted_by: `chat_id:${chatId}`, p_region: "australia",
+    });
+    if (error) { await tgSend(chatId, "Couldn't submit that purchase — try again, or check with admin."); return; }
+    const vendorName = data.vendor_name;
+    await tgSend(chatId, `✅ Submitted for approval (${items.length} items) — admin will review on the web dashboard before it's live.`);
+    await logActivity(supabase, "au", chatId, "stock_intake", `${vendorName}, ${items.length} items`);
+    data = { items: [] };
+    await tgSend(chatId, "Search vendor by name or WhatsApp number for the next purchase:", {
+      inline_keyboard: [[{ text: "➕ New Vendor", callback_data: "inv:newvendor" }], INV_EXIT_ROW_AU],
+    });
+    await saveSession(supabase, chatId, "inv_vendor_search", data);
+    return;
+  }
+}
+
+async function startItemEntryAu(supabase: any, chatId: number, data: any) {
+  data.curItem = {};
+  await tgSend(chatId, `Vendor: ${data.vendor_name}\n\nItem name?`, { inline_keyboard: [INV_EXIT_ROW_AU] });
+  await saveSession(supabase, chatId, "inv_item_name", data);
+}
+
+async function finishCurrentItemAu(supabase: any, chatId: number, data: any) {
+  const item = data.curItem;
+  if (item.defect_qty && item.defect_qty > 0) {
+    const goodQty = item.qty - item.defect_qty;
+    if (goodQty > 0) data.items.push({ ...item, qty: goodQty, is_defective: false, defect_qty: null, defect_reason: null });
+    data.items.push({ ...item, qty: item.defect_qty, is_defective: true });
+  } else {
+    data.items.push({ ...item, is_defective: false });
+  }
+  delete data.curItem;
+  await showItemAddedMenuAu(supabase, chatId, data);
+}
+
+async function showItemAddedMenuAu(supabase: any, chatId: number, data: any) {
+  await tgSend(chatId, "Item added.", {
+    inline_keyboard: [
+      [{ text: "➕ Add another item", callback_data: "inv:additem" }],
+      [{ text: "📋 Review purchase so far", callback_data: "inv:review" }],
+      INV_EXIT_ROW_AU,
+    ],
+  });
+  await saveSession(supabase, chatId, "inv_item_added", data);
+}
+
+async function showInvSummaryAu(supabase: any, chatId: number, data: any) {
+  if (!data.items?.length) {
+    await tgSend(chatId, "No items staged yet.", { inline_keyboard: [[{ text: "➕ Add item", callback_data: "inv:additem" }], INV_EXIT_ROW_AU] });
+    return;
+  }
+  const lines = data.items
+    .map((it: any, i: number) => `${i + 1}. ${it.name}${it.variant ? ` (${it.variant})` : ""} — ₹${it.cost} x${it.qty}` + (it.is_defective ? ` ⚠️ defective${it.defect_reason ? ": " + it.defect_reason : ""}` : ""))
+    .join("\n");
+  const buttons = data.items.map((_: any, i: number) => [
+    { text: `✏️ Edit #${i + 1}`, callback_data: `inv:editrow:${i}` },
+    { text: `🗑️ Remove #${i + 1}`, callback_data: `inv:removerow:${i}` },
+  ]);
+  buttons.push([{ text: "➕ Add another item", callback_data: "inv:additem" }]);
+  buttons.push([{ text: "✅ Confirm & submit purchase", callback_data: "inv:submit" }]);
+  buttons.push(INV_EXIT_ROW_AU);
+  await tgSend(chatId, `Purchase so far — Vendor: ${data.vendor_name}\n\n${lines}`, { inline_keyboard: buttons });
+  await saveSession(supabase, chatId, "inv_summary", data);
+}
+
+async function showFinalConfirmAu(supabase: any, chatId: number, data: any) {
+  const total = data.items.reduce((a: number, it: any) => a + it.cost * it.qty, 0);
+  await tgSend(
+    chatId,
+    `Submit this purchase to the live system?\n\nVendor: ${data.vendor_name}\nItems: ${data.items.length}\nTotal cost: ₹${total} (vendor cost, always INR)\nPaid: ₹${data.paymentAmount} (${data.paymentMode})\nSplit: Meenakshi ₹${data.paymentSplit.meenakshi} / Shalini ₹${data.paymentSplit.shalini}\n\nThis submits for admin approval — nothing is live inventory until approved.`,
+    {
+      inline_keyboard: [
+        [{ text: "✅ Submit", callback_data: "inv:finalsubmit" }],
+        [{ text: "◀ Back to summary", callback_data: "inv:review" }],
+        INV_EXIT_ROW_AU,
+      ],
+    },
+  );
+  await saveSession(supabase, chatId, "inv_final_confirm", data);
+}
+
+async function handleInventoryTextAu(supabase: any, chatId: number, state: string, data: any, text: string) {
+  const skip = text.trim().toLowerCase() === "skip";
+
+  if (state === "inv_vendor_search") {
+    const q = text.trim();
+    const { data: matches } = await supabase.from("vendors").select("id,name,company_name,wa_number").or(`name.ilike.%${q}%,company_name.ilike.%${q}%,wa_number.ilike.%${q}%`).limit(8);
+    if (!matches?.length) {
+      await tgSend(chatId, `No vendors matched "${q}".`, { inline_keyboard: [[{ text: "➕ New Vendor", callback_data: "inv:newvendor" }], INV_EXIT_ROW_AU] });
+      return;
+    }
+    const buttons = matches.map((v: any) => [{ text: `${v.name}${v.company_name ? " (" + v.company_name + ")" : ""}`, callback_data: `inv:vendor:${v.id}` }]);
+    buttons.push([{ text: "➕ New Vendor", callback_data: "inv:newvendor" }]);
+    buttons.push(INV_EXIT_ROW_AU);
+    await tgSend(chatId, `Matches for "${q}":`, { inline_keyboard: buttons });
+    return;
+  }
+  if (state === "inv_vendor_new_name") {
+    if (!text.trim()) { await tgSend(chatId, "Name can't be empty — vendor name?"); return; }
+    data.newVendor.name = text.trim();
+    await tgSend(chatId, "Company name? Type 'skip' if none.", { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_vendor_new_company", data);
+    return;
+  }
+  if (state === "inv_vendor_new_company") {
+    data.newVendor.company_name = skip ? null : text.trim();
+    await tgSend(chatId, "WhatsApp number? Type 'skip' if none.", { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_vendor_new_wa", data);
+    return;
+  }
+  if (state === "inv_vendor_new_wa") {
+    data.newVendor.wa_number = skip ? null : text.trim();
+    await tgSend(chatId, "Place? Type 'skip' if none.", { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_vendor_new_place", data);
+    return;
+  }
+  if (state === "inv_vendor_new_place") {
+    data.newVendor.place = skip ? null : text.trim();
+    const { data: vid } = await supabase.rpc("next_vendor_id");
+    const { data: created, error } = await supabase.from("vendors").insert({
+      vendor_id: vid, name: data.newVendor.name, company_name: data.newVendor.company_name,
+      wa_number: data.newVendor.wa_number, place: data.newVendor.place, status: "active",
+    }).select().single();
+    if (error || !created) { await tgSend(chatId, "Couldn't save that vendor — try again."); return; }
+    data.vendor_uuid = created.id;
+    data.vendor_name = created.name;
+    delete data.newVendor;
+    await tgSend(chatId, `✅ Vendor added: ${created.name} (${vid})`);
+    await startItemEntryAu(supabase, chatId, data);
+    return;
+  }
+  if (state === "inv_item_name") {
+    if (!text.trim()) { await tgSend(chatId, "Name can't be empty — item name?"); return; }
+    data.curItem.name = text.trim();
+    await tgSend(chatId, "Material? Type 'skip' if none.", { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_item_material", data);
+    return;
+  }
+  if (state === "inv_item_material") {
+    data.curItem.material = skip ? null : text.trim();
+    await tgSend(chatId, "Variant? Type 'skip' if none.", { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_item_variant", data);
+    return;
+  }
+  if (state === "inv_item_variant") {
+    data.curItem.variant = skip ? null : text.trim();
+    await tgSend(chatId, "Cost per piece (₹ — vendor cost is always INR, even for AU purchases)?", { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_item_cost", data);
+    return;
+  }
+  if (state === "inv_item_cost") {
+    const cost = parseFloat(text);
+    if (!cost || cost <= 0) { await tgSend(chatId, "Enter a valid cost per piece (₹)?"); return; }
+    data.curItem.cost = cost;
+    await tgSend(chatId, "Quantity?", { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_item_qty", data);
+    return;
+  }
+  if (state === "inv_item_qty") {
+    const qty = parseInt(text, 10);
+    if (!qty || qty <= 0) { await tgSend(chatId, "Enter a valid quantity?"); return; }
+    data.curItem.qty = qty;
+    const suggestion = await suggestMrpAu(supabase, data.curItem.name, data.curItem.material, data.curItem.variant, data.curItem.cost);
+    await tgSend(chatId, `${suggestion ? `Suggested sale price: ${suggestion}\n\n` : ""}Type the sale price to use (A$), or 'skip' to leave blank.`, { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_item_mrp", data);
+    return;
+  }
+  if (state === "inv_item_mrp") {
+    data.curItem.mrp = skip ? null : parseFloat(text) || null;
+    data.curItem.photos = [];
+    await tgSend(chatId, "Send 1-4 photos of this item, then type 'done'.", { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_item_photos", data);
+    return;
+  }
+  if (state === "inv_item_photos") {
+    if (text.trim().toLowerCase() === "done") {
+      if (!data.curItem.photos?.length) { await tgSend(chatId, "At least one photo is required — send a photo, then type 'done'."); return; }
+      await tgSend(chatId, "Any defective pieces in this batch — flag for return to vendor now?", {
+        inline_keyboard: [[{ text: "⚠️ Yes", callback_data: "inv:defect:yes" }, { text: "No", callback_data: "inv:defect:no" }], INV_EXIT_ROW_AU],
+      });
+      await saveSession(supabase, chatId, "inv_item_defect_check", data);
+    }
+    return;
+  }
+  if (state === "inv_item_defect_qty") {
+    const q = parseInt(text, 10);
+    if (!q || q <= 0 || q > data.curItem.qty) { await tgSend(chatId, `Enter a valid defective quantity (1-${data.curItem.qty})?`); return; }
+    data.curItem.defect_qty = q;
+    await tgSend(chatId, "Reason?", { inline_keyboard: [INV_EXIT_ROW_AU] });
+    await saveSession(supabase, chatId, "inv_item_defect_reason", data);
+    return;
+  }
+  if (state === "inv_item_defect_reason") {
+    data.curItem.defect_reason = text.trim();
+    await finishCurrentItemAu(supabase, chatId, data);
+    return;
+  }
+  if (state === "inv_edit_value") {
+    const field = data.editField;
+    const item = data.items[data.editIdx];
+    if (["cost", "qty", "mrp"].includes(field)) item[field] = parseFloat(text) || item[field];
+    else item[field] = text.trim();
+    delete data.editField;
+    delete data.editIdx;
+    await showInvSummaryAu(supabase, chatId, data);
+    return;
+  }
+  if (state === "inv_payment_amount") {
+    const amt = parseFloat(text);
+    if (!amt || amt <= 0) { await tgSend(chatId, "Enter a valid amount (₹)?"); return; }
+    data.paymentAmount = amt;
+    await tgSend(chatId, "Payment mode?", {
+      inline_keyboard: [
+        [{ text: "Cash", callback_data: "inv:paymode:cash" }, { text: "Card", callback_data: "inv:paymode:card" }],
+        [{ text: "Bank Transfer", callback_data: "inv:paymode:bank" }, { text: "Other", callback_data: "inv:paymode:other" }],
+        INV_EXIT_ROW_AU,
+      ],
+    });
+    await saveSession(supabase, chatId, "inv_payment_mode", data);
+    return;
+  }
+  if (state === "inv_payment_split") {
+    let meenakshi: number, shalini: number;
+    if (skip) { meenakshi = data.paymentAmount / 2; shalini = data.paymentAmount / 2; }
+    else { meenakshi = parseFloat(text) || 0; shalini = data.paymentAmount - meenakshi; }
+    data.paymentSplit = { meenakshi, shalini };
+    await showFinalConfirmAu(supabase, chatId, data);
+    return;
+  }
+}
+
+async function handleInventoryPhotoAu(supabase: any, chatId: number, data: any, photoSizes: any[]) {
+  if (!data.curItem) return;
+  const largest = photoSizes[photoSizes.length - 1];
+  const result = await uploadTelegramPhotoGodown(largest.file_id, "item-photos", `${Date.now()}-inventory-telegram-au.jpg`);
+  if ("error" in result) { await tgSend(chatId, `Couldn't save that photo — ${result.error}`); return; }
+  data.curItem.photos = [...(data.curItem.photos || []), result.url].slice(0, 4);
+  await saveSession(supabase, chatId, "inv_item_photos", data);
+  await tgSend(chatId, `Photo ${data.curItem.photos.length}/4 saved. Send another, or type 'done'.`);
+}
+
+async function suggestMrpAu(supabase: any, name: string, material: string | null, variant: string | null, cost: number): Promise<string | null> {
+  try {
+    const { data: keyRow } = await supabase.from("settings").select("value").eq("key", "gemini_key").maybeSingle();
+    const apiKey = keyRow?.value;
+    if (!apiKey) return null;
+    const prompt = `Estimate a fair retail sale price in AUD for a handloom saree to be sold in Australia: "${name}" ${material || ""} ${variant ? "(" + variant + ")" : ""}, vendor cost price (India, INR) ₹${cost}. Reply with ONLY a number (AUD), no currency symbol, no other text.`;
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const raw = json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    const num = parseFloat((raw || "").replace(/[^\d.]/g, ""));
+    return num ? fmtAud(num) : null;
+  } catch {
+    return null;
+  }
+}

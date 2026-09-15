@@ -415,6 +415,7 @@
         <div class="detail">This doesn't go live immediately — it's reviewed on the computer first, then added to real stock. This is by design, so nothing gets added by mistake.</div>
       </li>
     </ol>
+    <div class="note" style="margin-left:0;margin-top:14px;"><b>New (2026-09-15):</b> there's now a second option, <span class="chip" style="display:inline-block;">➕ Enter inventory (vendor purchase)</span>, for recording a full purchase from a vendor in one go (multiple items, vendor details, payment split) — see Part 6 below. Approval for either option is never from your own bot — always Shalini, Meenakshi Monitor, or the web admin panel.</div>
   </section>
 
   <section class="part" id="part4">
@@ -470,6 +471,52 @@
       <li data-n="5">
         <p>You'll get back a <b>link</b>. Share this however suits the event — put it on a sign, a QR code, or send it directly.</p>
         <div class="detail">Anyone who opens the link, types their name and WhatsApp number, gets their own unique code on screen immediately — you don't need to be there for it to work.</div>
+      </li>
+    </ol>
+  </section>
+
+  <section class="part" id="part6">
+    <div class="part-head">
+      <div class="part-badge">6</div>
+      <h2>Enter inventory (vendor purchase)</h2>
+    </div>
+    <p class="part-sub">Use this to record a full purchase from a vendor in one go — multiple items, vendor details, payment. Good for a proper stock-up trip rather than one item at a time.</p>
+    <ol class="steps">
+      <li data-n="1">
+        <p>From the main menu, tap <span class="chip" style="display:inline-block;">➕ Enter inventory (vendor purchase)</span>, then search the vendor by name or WhatsApp number, or tap <b>➕ New Vendor</b>.</p>
+      </li>
+      <li data-n="2">
+        <p>Answer the item questions one at a time: name, material, variant, <b>cost per piece (₹)</b>, quantity, sale price (A$), photos.</p>
+        <div class="detail">Cost is always in ₹ — that's what's actually paid to the vendor in India. The sale price you set is in A$ — that's what your customers pay.</div>
+      </li>
+      <li data-n="3">
+        <p>If any pieces arrived defective, flag them and they're kept out of sellable stock entirely — they won't accidentally get sold.</p>
+      </li>
+      <li data-n="4">
+        <p>Add as many items as the purchase has, then tap <b>📋 Review purchase so far</b> to see everything, edit a field, or remove a row.</p>
+      </li>
+      <li data-n="5">
+        <p>Confirm & submit — enter the amount paid (₹) and how it was split, then submit.</p>
+        <div class="detail">Nothing goes live yet. <b>Approval is never from your own bot</b> — Shalini, Meenakshi Monitor, or the web admin panel review and approve it before it becomes real stock.</div>
+      </li>
+    </ol>
+  </section>
+
+  <section class="part" id="part7">
+    <div class="part-head">
+      <div class="part-badge">7</div>
+      <h2>Godown check</h2>
+    </div>
+    <p class="part-sub">Use this to verify physical stock actually matches what the system expects — either a quick end-of-day check, or spot-checking one item.</p>
+    <ol class="steps">
+      <li data-n="1">
+        <p>From the main menu, tap <span class="chip" style="display:inline-block;">📦 Godown check</span>, then <b>End-of-day reconciliation</b> or <b>Spot check an item</b>.</p>
+      </li>
+      <li data-n="2">
+        <p>For each item, confirm <b>✅ Matches</b> if the physical count is right, or tap <b>⚠️ Discrepancy</b> if not.</p>
+      </li>
+      <li data-n="3">
+        <p>A discrepancy asks what kind (Missing / Damaged / Extra), lets you pick which specific piece(s) if relevant, and takes an optional note or photo. This gets logged for follow-up — you don't need to fix it there and then.</p>
       </li>
     </ol>
   </section>
