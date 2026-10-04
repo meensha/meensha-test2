@@ -101,6 +101,36 @@ Reply with ONLY one JSON object, no markdown, no explanation:
   }
 }
 
+// ── Social media boost assistant (free-form guidance layer) ────────────────
+// Separate from askGemini() above on purpose: askGemini() is a fixed-lookup
+// router that never lets the LLM free-chat. This one does — scoped by
+// instructions (not by a lookup catalog) to Instagram/social-growth guidance
+// only, since the whole feature is Shalini asking "what next" style
+// questions about the IG setup checklist (see telegram-bot/index.ts's
+// sendSocialBoostNudge/getIgSetupChecklist), not fixed stock/sales data.
+// Reuses callLLM() so it honors the same OpenRouter-then-Gemini fallback.
+export async function askSocialBoostAssistant(
+  supabase: SB,
+  question: string,
+  checklist: { id: string; label: string; done: boolean }[],
+): Promise<string> {
+  const done = checklist.filter((c) => c.done).map((c) => c.label);
+  const pending = checklist.filter((c) => !c.done).map((c) => c.label);
+  const prompt = `You are a friendly guide helping a saree shop's staff member grow traffic to their Instagram page and website. You are NOT a general-purpose assistant — only answer questions about Instagram/social media growth, the Instagram Graph API setup checklist below, or driving traffic to their online store. For anything else, politely say you can only help with social media growth topics.
+
+Instagram Graph API setup checklist — already done: ${done.length ? done.join(", ") : "none yet"}. Still pending: ${pending.length ? pending.join(", ") : "none, all done"}.
+
+Staff member asked: "${question}"
+
+Give a short, practical, encouraging answer (3-6 lines, no markdown formatting). If the question is about one of the pending setup steps, walk them through it concretely (where to tap/click, what to look for) rather than giving generic advice.`;
+
+  try {
+    return await callLLM(supabase, prompt);
+  } catch {
+    return "Sorry, I couldn't reach the AI assistant right now — try again in a bit, or check the pending steps list above.";
+  }
+}
+
 // ── Vision extraction (Stock Intake guided flow) ───────────────────────────
 // Separate from askGemini()'s fixed-lookup Q&A router above — this sends the
 // invoice photo itself to Gemini (inline base64, same

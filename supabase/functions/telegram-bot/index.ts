@@ -8,7 +8,7 @@
 // Supabase auto-provides SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { askGemini, extractInvoiceData, type InvoiceDraft } from "../_shared/askGemini.ts";
+import { askGemini, askSocialBoostAssistant, extractInvoiceData, type InvoiceDraft } from "../_shared/askGemini.ts";
 import { LOOKUP_CATALOG_REGIONAL, runLookup } from "../_shared/knowledgeBase.ts";
 import { handleRequestAction } from "../_shared/requestActions.ts";
 import { logActivity } from "../_shared/activityLog.ts";
@@ -1753,6 +1753,24 @@ async function handleTextInput(
   // only fall through to the natural-language Q&A (stock/price/sales
   // lookups, India-scoped only) if nothing matched.
   if (await tryMenuKeywordSearch(chatId, text)) return;
+
+  // Social-boost free-form guidance (sendSocialBoostNudge's "Ask me anything
+  // and I'll guide you step by step") — checked before the stock/sales
+  // askGemini() fallback below so a question like "what next" or "how do I
+  // boost traffic" doesn't get swallowed by that fixed lookup router.
+  // Deliberately does NOT key on "instagram"/"insta" — those already match
+  // MENU_ACTIONS' "🔗 Insta link" entry above via tryMenuKeywordSearch, so
+  // keying on them here too would never fire (and would change what typing
+  // "instagram" does if it ever did).
+  const SOCIAL_BOOST_KEYWORDS = ["social", "traffic", "boost", "what next", "what's next"];
+  const lowerText = text.trim().toLowerCase();
+  if (SOCIAL_BOOST_KEYWORDS.some((k) => lowerText.includes(k))) {
+    const checklist = await getIgSetupChecklist(supabase);
+    const answer = await askSocialBoostAssistant(supabase, text, checklist);
+    await tgSend(chatId, answer);
+    return;
+  }
+
   try {
     const answer = await askGemini(supabase, text, LOOKUP_CATALOG_REGIONAL, (sb, name, params) =>
       runLookup(sb, name, { ...params, region: "india" }));

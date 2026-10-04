@@ -19,8 +19,6 @@ Tracked here so nothing raised in a session gets lost. Git-tracked (syncs to git
   - Needs: a supervisor → worker → QA → reporting-manager agent pipeline, each terminating after its task; daily morning-brief progress reporting; all actions recorded to syncthing/obsidian/gitea (and blog posts published) each phase. **The 4-hourly TODO-worker cloud routine (below) is the first piece of this — currently blocked on connecting GitHub to claude.ai.**
 - [ ] sitemap.xml still has no entries for the (future, Artisans-section-only) CSR/weaver-upliftment posts — add once that content exists.
 
-- [ ] "Social media boost worker" — remaining piece: the free-form "ask me anything" guidance layer (the reminder-nudge + checklist-toggle half is now built, see Done below). OpenRouter is already wired up in `supabase/functions/_shared/askGemini.ts` (`callLLM`, reads `settings.openrouter_key`/`openrouter_model` fresh each call, falls back to `settings.gemini_key`) — it's just never had an actual key value set. Add that via admin.html/SQL before this is testable end-to-end (needs admin/owner access this cloud worker doesn't have). Needs a new, separate open-ended export from that file (e.g. `askSocialBoostAssistant(supabase, question, checklist)`) — the existing `askGemini()` export is deliberately scoped to fixed stock/sales/price lookups only, never raw LLM chat. Hook point: `handleTextInput`'s end-of-chain fallback in `telegram-bot/index.ts` (falls through to `askGemini`'s stock/sales Q&A when no flow/keyword matches) — the new assistant needs its own branch spliced in before that (keyed on keywords like "instagram"/"social"/"traffic"/"boost"/"what next", or a dedicated `socialboost_*` session state) so it doesn't collide with the existing stock-lookup fallback.
-
 - [ ] SEO follow-ups from the 2026-09-27 audit (full detail: `../meensha.in-audit/MEASUREMENT.md`):
   - Font loading is now the main LCP cost (homepage lab LCP 9.5 s): trim Google Fonts weights and preload the hero font. **Needs owner OK**, since it can change how the site looks.
   - GSC after deploy: resubmit sitemap.xml, and "Request indexing" on 3–5 `/sarees/<weave>/` pages. Measure at +7/+14/+28 days (Oct 4/11/25) against the MEASUREMENT.md table.
@@ -34,6 +32,30 @@ Tracked here so nothing raised in a session gets lost. Git-tracked (syncs to git
 
 ## Done (recent, for reference)
 
+- 2026-10-04 (cloud routine): Social media boost worker, free-form "ask me anything" guidance
+  layer — the remaining piece of this item (the reminder-nudge + checklist-toggle half landed
+  earlier today, see below). New `askSocialBoostAssistant(supabase, question, checklist)`
+  export in `supabase/functions/_shared/askGemini.ts`, separate from the existing `askGemini()`
+  (which stays deliberately scoped to fixed stock/sales/price lookups) — this one lets the LLM
+  answer free-form, but its prompt restricts it to Instagram/social-growth topics and the IG
+  setup checklist only, declining anything else. Reuses the existing `callLLM()`
+  OpenRouter-then-Gemini fallback, so it activates the moment an `openrouter_key`/`gemini_key`
+  is actually set (still not set — see below). Wired into India bot only
+  (`supabase/functions/telegram-bot/index.ts`'s `handleTextInput`), per the spec's scope: a new
+  keyword branch (`social`/`traffic`/`boost`/`what next`/`what's next`) spliced in after the
+  existing menu-keyword search and before the stock/sales `askGemini()` fallback, so it answers
+  the "Ask me anything and I'll guide you step by step" prompt from `sendSocialBoostNudge`
+  without colliding with that fallback. Deliberately left "instagram"/"insta" out of the new
+  branch's keyword list — those already match the pre-existing "🔗 Insta link" menu action
+  (`MENU_ACTIONS` in the same file) via the menu-keyword search that runs first, so keying on
+  them here too would never fire and would risk changing that existing feature's behavior if it
+  ever did. Type-checked both edited files with `tsc --strict` (only the expected
+  `Deno`/`esm.sh` noise and the pre-existing `SendFn` mismatch, both pre-existing in this repo).
+  **Not deployed and not end-to-end testable** — same sandbox limitation as this item's other
+  half: no `supabase` CLI, no network route to Supabase, and no `openrouter_key`/`gemini_key`
+  actually set in `settings` yet (needs admin/owner access this cloud worker doesn't have).
+  Needs a `supabase functions deploy telegram-bot --no-verify-jwt` plus an actual key set via
+  admin.html/SQL from a session that can reach Supabase before Shalini can use this live.
 - 2026-10-04: Visiting-card redesign per owner's follow-up request — logo now centered above
   the name (was side-by-side in a header row), the wordmark/tagline block under the logo is
   gone (front now shows logo + name + title only), and the simple L-bracket corners are
